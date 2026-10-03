@@ -125,13 +125,16 @@ final class Scanner
             $this->say('ESPN fight info failed: ' . $e->getMessage());
         }
 
-        // 8–11. News analysis for new movements
+        // 8–11. News analysis for new movements (not for "close" moves: the cause is the fight result, and
+        // TheNewsAPI's daily requests are better spent on real drops).
         foreach ($newMoves as $movementId) {
-            try {
-                $result = $this->analyzer->analyze($movementId);
-                $this->say("Movement #$movementId → " . ($this->analyzer->lastSummary ?: $result));
-            } catch (Throwable $e) {
-                $errors[] = "News for movement #$movementId: " . $e->getMessage();
+            if (!$this->isClose($movementId)) {
+                try {
+                    $result = $this->analyzer->analyze($movementId);
+                    $this->say("Movement #$movementId → " . ($this->analyzer->lastSummary ?: $result));
+                } catch (Throwable $e) {
+                    $errors[] = "News for movement #$movementId: " . $e->getMessage();
+                }
             }
             // Evidence (ESPN fight / plays / news, Kalshi trades). Problems here are logged, never fail the scan.
             if ($this->evidence) {
@@ -148,6 +151,9 @@ final class Scanner
         // Retry earlier news failures (handoff: "retried on the next scheduled scan").
         $this->retryFailedNews($errors);
         $this->evidence?->retryFailed(fn(string $m) => $this->say($m));
+        if ($n = array_sum(array_intersect_key(Http::$counts, array_flip(['site.api.espn.com', 'sports.core.api.espn.com'])))) {
+            $this->say("ESPN requests this scan: $n");
+        }
 
         // 12–13. Finish
         $status = !$errors ? 'completed' : (($updated > 0 || $found === 0) ? 'partial' : 'failed');
@@ -269,9 +275,11 @@ final class Scanner
             $snapshotId = $stmt->fetchColumn();
 
             $movementIds = [];
-            // Only open-to-open comparisons count; a settlement jump to 0/100 is not a "movement".
-            if ($snapshotId && $previous && $isOpen) {
-                $movementIds = $this->detectMovements($marketId, (int) $previous['id'], (int) $snapshotId, $previous, $vals);
+            // Open → open: a regular "drop". Open → closed/settled: the final jump is saved as a "close" movement,
+            // because a stoppage usually closes Kalshi's market before the next scan (ESPN explains it with the result).
+            if ($snapshotId && $previous && ($isOpen || $wasOpen)) {
+                $movementIds = $this->detectMovements($marketId, (int) $previous['id'], (int) $snapshotId, $previous, $vals,
+                    $isOpen ? 'drop' : 'close');
             }
 
             $this->db->commit();
@@ -283,13 +291,13 @@ final class Scanner
     }
 
     /** Compare with the immediately previous snapshot only. One record per side per scan. */
-    private function detectMovements(int $marketId, int $prevId, int $curId, array $prev, array $cur): array
+    private function detectMovements(int $marketId, int $prevId, int $curId, array $prev, array $cur, string $type = 'drop'): array
     {
         $ids  = [];
         $stmt = $this->db->prepare(
             'INSERT INTO market_movements (market_id, previous_snapshot_id, current_snapshot_id, dropped_side,
-                                           previous_price, current_price, drop_amount, drop_percentage_points)
-             VALUES (:m, :prev, :cur, :side, :pp, :cp, :amt, :pts)
+                                           previous_price, current_price, drop_amount, drop_percentage_points, movement_type)
+             VALUES (:m, :prev, :cur, :side, :pp, :cp, :amt, :pts, :type)
              ON CONFLICT (current_snapshot_id, dropped_side) DO NOTHING
              RETURNING id'
         );
@@ -307,14 +315,65 @@ final class Scanner
             }
             $stmt->execute([
                 ':m' => $marketId, ':prev' => $prevId, ':cur' => $curId, ':side' => $side,
-                ':pp' => $p, ':cp' => $c, ':amt' => $drop, ':pts' => $pts,
+                ':pp' => $p, ':cp' => $c, ':amt' => $drop, ':pts' => $pts, ':type' => $type,
             ]);
             if ($id = $stmt->fetchColumn()) {
                 $ids[] = (int) $id;
-                $this->say(sprintf('  ▼ market #%d %s dropped %.1f pts (%s → %s)', $marketId, strtoupper($side), $pts, $p, $c));
+                $this->say(sprintf('  ▼ market #%d %s %s %.1f pts (%s → %s)', $marketId, strtoupper($side),
+                    $type === 'close' ? 'closed after falling' : 'dropped', $pts, $p, $c));
             }
         }
         return $ids;
+    }
+
+    /**
+     * Adds the "close" movement to markets that closed in the last $hours before this feature existed
+     * (their final snapshot was saved, but the jump into it wasn't recorded), then explains them with ESPN.
+     *
+     * @return int[] new movement ids
+     */
+    public function backfillCloses(int $hours = 72): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT m.id, m.event_id, s.id AS cur_id, s.yes_price, s.no_price, p.id AS prev_id, p.yes_price AS prev_yes, p.no_price AS prev_no
+               FROM markets m
+               JOIN events e ON e.id = m.event_id
+               JOIN LATERAL (SELECT id, yes_price, no_price, captured_at FROM market_snapshots
+                              WHERE market_id = m.id ORDER BY captured_at DESC, id DESC LIMIT 1) s ON TRUE
+               JOIN LATERAL (SELECT id, yes_price, no_price FROM market_snapshots
+                              WHERE market_id = m.id ORDER BY captured_at DESC, id DESC OFFSET 1 LIMIT 1) p ON TRUE
+              WHERE e.sport = :sport AND m.status <> 'open'
+                AND s.captured_at > NOW() - make_interval(hours => :h)
+                AND NOT EXISTS (SELECT 1 FROM market_movements mm WHERE mm.current_snapshot_id = s.id)"
+        );
+        $stmt->execute([':sport' => DEFAULT_SPORT, ':h' => max(1, $hours)]);
+
+        $ids = [];
+        $events = [];
+        foreach ($stmt->fetchAll() as $r) {
+            $new = $this->detectMovements((int) $r['id'], (int) $r['prev_id'], (int) $r['cur_id'],
+                ['yes_price' => $r['prev_yes'], 'no_price' => $r['prev_no']],
+                ['yes_price' => $r['yes_price'], 'no_price' => $r['no_price']], 'close');
+            if ($new) {
+                $ids = array_merge($ids, $new);
+                $events[(int) $r['event_id']] = true;
+            }
+        }
+        if ($ids && $this->evidence) {
+            $this->evidence->refreshFightInfo(fn(string $m) => $this->say($m), array_keys($events));
+            foreach ($ids as $id) {
+                $this->evidence->collect($id);
+                $this->say("Movement #$id (close) → {$this->evidence->lastSummary}");
+            }
+        }
+        return $ids;
+    }
+
+    private function isClose(int $movementId): bool
+    {
+        $stmt = $this->db->prepare('SELECT movement_type = \'close\' FROM market_movements WHERE id = :id');
+        $stmt->execute([':id' => $movementId]);
+        return (bool) $stmt->fetchColumn();
     }
 
     private function updateEventStatuses(): void

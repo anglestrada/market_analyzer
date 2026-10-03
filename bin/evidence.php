@@ -6,6 +6,7 @@
  *   php bin/evidence.php 123 espn espn_news  only these sources (espn, espn_plays, espn_news, kalshi_trades)
  *   php bin/evidence.php latest              the most recent drop
  *   php bin/evidence.php fights              refresh ESPN fight info for every open bout and print it
+ *   php bin/evidence.php closes [hours]      record missed "market closed" jumps (default: last 72 h) and explain them
  */
 declare(strict_types=1);
 
@@ -16,6 +17,13 @@ if (PHP_SAPI !== 'cli') {
 require_once __DIR__ . '/../config.php';
 
 $arg = $argv[1] ?? '';
+if ($arg === 'closes') {
+    // Markets that closed in the last N hours (default 72) without a recorded closing jump → add it + ESPN result.
+    $hours = (int) ($argv[2] ?? 72);
+    $ids   = Scanner::make(fn($m) => print("$m\n"))->backfillCloses($hours);
+    echo $ids ? count($ids) . ' close movement(s) added: #' . implode(', #', $ids) . "\n" : "No missed closes in the last {$hours}h.\n";
+    exit(0);
+}
 if ($arg === 'fights') {
     db()->exec('UPDATE events SET espn_checked_at = NULL');   // force a refresh
     EvidenceCollector::make(db(), new KalshiClient())->refreshFightInfo(fn($m) => print("$m\n"));
@@ -35,7 +43,7 @@ if ($arg === 'latest') {
     $arg = (string) db()->query('SELECT id FROM market_movements ORDER BY detected_at DESC LIMIT 1')->fetchColumn();
 }
 if (!ctype_digit($arg)) {
-    fwrite(STDERR, "Usage: php bin/evidence.php <movement_id|latest|fights> [espn|espn_plays|espn_news|kalshi_trades ...]\n");
+    fwrite(STDERR, "Usage: php bin/evidence.php <movement_id|latest|fights|closes> [espn|espn_plays|espn_news|kalshi_trades ...]\n");
     exit(1);
 }
 $only = array_slice($argv, 2) ?: null;

@@ -105,8 +105,18 @@ Below it are the evidence timeline (the best item per source plus the drop, in t
 **Fight info · ESPN** table: records, sportsbook moneyline, live stats and judges' scores. The scanner refreshes it
 every scan on fight night and hourly before that.
 
+**Fights that end between scans.** A stoppage usually makes Kalshi close the market before the next scan. The jump
+into that final snapshot is saved as a **close** movement, marked "closed" in the tables. It isn't sent to TheNewsAPI.
+ESPN explains it with the result. If ESPN hasn't marked the fight final yet, the ESPN check retries every scan for
+about an hour. Closed bouts also keep refreshing their ESPN fight info until the result is posted. To add closes
+missed before this existed, run `php bin/evidence.php closes 72` (the number is how many hours back to look).
+
+ESPN publishes no rate limit. A normal scan makes a handful of ESPN requests (the count is printed at the end of
+each scan). If ESPN ever answers 429/403, the scan stops calling ESPN and tries again on the next scan.
+
 ```bash
 php bin/evidence.php fights        # refresh + print ESPN info for every open bout
+php bin/evidence.php closes 72     # record + explain markets that closed in the last 72 h
 php bin/evidence.php latest        # re-run the evidence search for the newest drop
 php bin/evidence.php 123 espn_news # one source for drop #123
 ```

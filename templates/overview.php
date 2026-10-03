@@ -197,6 +197,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                     <td class="num col-no"><?= $cents($d['no_after']) ?></td>
                     <td class="num">
                         <span class="side side-<?= e($d['dropped_side']) ?>"><?= strtoupper(e($d['dropped_side'])) ?></span>
+                        <?php if (($d['movement_type'] ?? 'drop') === 'close'): ?><span class="src-chip" title="Kalshi closed the market; this is the jump in its final snapshot">closed</span><?php endif; ?>
                         <span class="delta down" title="<?= e(strtoupper($d['dropped_side'])) ?> fell <?= e(number_format((float) $d['drop_percentage_points'], 1)) ?> percentage points">−<?= e(number_format((float) $d['drop_percentage_points'], 1)) ?> pp</span>
                     </td>
                     <td class="num col-detected"><?= e(fmt_time($d['detected_at'], 'M j, g:i A')) ?></td>

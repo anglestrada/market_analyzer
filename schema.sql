@@ -236,6 +236,13 @@ ALTER TABLE movement_evidence DROP CONSTRAINT IF EXISTS movement_evidence_source
 ALTER TABLE movement_evidence ADD CONSTRAINT movement_evidence_source_check
     CHECK (source IN ('espn', 'espn_plays', 'espn_news', 'kalshi_trades'));
 
+-- drop  = a ≥ 5 pp fall between two open snapshots
+-- close = the jump in the market's final snapshot (the fight was stopped / decided and Kalshi closed trading)
+ALTER TABLE market_movements ADD COLUMN IF NOT EXISTS movement_type TEXT NOT NULL DEFAULT 'drop';
+DO $$ BEGIN
+    ALTER TABLE market_movements ADD CONSTRAINT market_movements_type_chk CHECK (movement_type IN ('drop', 'close'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ESPN's latest view of each bout (records, weight class, odds, status, stats), refreshed by the scanner.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS espn_data       JSONB;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS espn_checked_at TIMESTAMPTZ;
