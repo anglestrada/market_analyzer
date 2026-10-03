@@ -49,6 +49,20 @@ final class FightContext
         return new self($subject, array_slice(array_values(array_unique($others)), 0, 4), (string) $mv['dropped_side']);
     }
 
+    /** Both fighters of an event, with no "subject" (used to look the bout up on ESPN). */
+    public static function forEvent(PDO $db, array $event): self
+    {
+        return self::forMovement($db, [
+            'yes_subtitle' => null, 'event_id' => $event['id'], 'event_title' => $event['event_title'] ?? '', 'dropped_side' => 'yes',
+        ]);
+    }
+
+    /** Which of this bout's fighters a name (e.g. ESPN's "Raul Rosas Jr.") refers to. */
+    public function whichFighter(string $name): ?string
+    {
+        return array_key_first($this->mentions($name));
+    }
+
     /** @return string[] */
     public function fighters(): array
     {

@@ -118,6 +118,13 @@ final class Scanner
 
         $this->updateEventStatuses();
 
+        // ESPN fight info (records, odds, status, stats) for the Overview, and fresh data for the drops below.
+        try {
+            $this->evidence?->refreshFightInfo(fn(string $m) => $this->say($m));
+        } catch (Throwable $e) {
+            $this->say('ESPN fight info failed: ' . $e->getMessage());
+        }
+
         // 8–11. News analysis for new movements
         foreach ($newMoves as $movementId) {
             try {
@@ -126,7 +133,7 @@ final class Scanner
             } catch (Throwable $e) {
                 $errors[] = "News for movement #$movementId: " . $e->getMessage();
             }
-            // Live evidence (ESPN, X, Reddit, Kalshi trades). Problems here are logged, never fail the scan.
+            // Evidence (ESPN fight / plays / news, Kalshi trades). Problems here are logged, never fail the scan.
             if ($this->evidence) {
                 try {
                     $this->evidence->collect($movementId);

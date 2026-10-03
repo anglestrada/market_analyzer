@@ -98,7 +98,7 @@ function market_payload(int $id, string $range, int $userId): ?array
     $range = array_key_exists($range, OVERVIEW_RANGES) ? $range : '24h';
 
     $stmt = db()->prepare(
-        'SELECT m.*, e.event_title, e.event_start_time,
+        'SELECT m.*, e.event_title, e.event_start_time, e.espn_data,
                 (SELECT 1 FROM watchlist_items w WHERE w.market_id = m.id AND w.user_id = :u) AS watched
            FROM markets m JOIN events e ON e.id = m.event_id WHERE m.id = :id'
     );
@@ -169,6 +169,52 @@ function market_payload(int $id, string $range, int $userId): ?array
         'series'  => $series,
         'moves'   => $moves,
         'analysis' => market_best_explanation($id),
+        'fight'    => espn_fight_info($m['espn_data'] ?? null, $m['yes_subtitle']),
+    ];
+}
+
+/**
+ * ESPN's saved view of the bout for the "Fight info" block, with this market's fighter first.
+ * Null when the scanner hasn't found the fight on ESPN.
+ */
+function espn_fight_info(?string $json, ?string $subject): ?array
+{
+    $f = $json ? json_decode($json, true) : null;
+    if (!is_array($f) || empty($f['fighters'])) {
+        return null;
+    }
+    $ctx      = new FightContext($subject ?: null, [], 'yes');
+    $fighters = [];
+    foreach ($f['fighters'] as $c) {
+        $line = $f['odds']['lines'][$c['id']] ?? null;
+        $fighters[] = [
+            'name'    => $c['name'],
+            'record'  => $c['record'] ?? null,
+            'winner'  => $c['winner'] ?? null,
+            'subject' => $subject !== null && $ctx->whichFighter($c['name']) === $subject,
+            'odds'    => $line,
+            'implied' => $line === null ? null : round(EspnClient::impliedProbability((int) $line) * 100, 1),
+            'stats'   => $f['stats'][$c['id']] ?? null,
+            'rounds'  => $f['linescores'][$c['id']] ?? null,
+        ];
+    }
+    usort($fighters, fn($a, $b) => $b['subject'] <=> $a['subject']);
+
+    return [
+        'event'        => $f['event'] ?? null,
+        'weight_class' => $f['weight_class'] ?? null,
+        'rounds'       => $f['rounds'] ?? null,
+        'venue'        => $f['venue'] ?? null,
+        'start'        => $f['start'] ?? null,
+        'state'        => $f['state'] ?? null,
+        'detail'       => $f['detail'] ?? null,
+        'result'       => $f['result'] ?? null,
+        'round'        => $f['round'] ?? null,
+        'clock'        => $f['clock'] ?? null,
+        'odds_source'  => $f['odds']['provider'] ?? null,
+        'url'          => safe_external_url($f['url'] ?? null),
+        'checked_at'   => $f['checked_at'] ?? null,
+        'fighters'     => $fighters,
     ];
 }
 
@@ -177,8 +223,8 @@ function evidence_sources_configured(): array
 {
     return [
         'espn'          => ESPN_ENABLED,
-        'x'             => (bool) X_BEARER_TOKEN,
-        'reddit'        => REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET,
+        'espn_plays'    => ESPN_ENABLED,
+        'espn_news'     => ESPN_ENABLED,
         'kalshi_trades' => KALSHI_TRADES_ENABLED,
     ];
 }
@@ -314,13 +360,17 @@ function movement_explanation(int $movementId): array
         ];
     }
 
-    // Headline: fits the drop first, then score, then source (ESPN > news > X > Reddit > trades).
-    $prio = ['espn' => 5, 'news' => 4, 'x' => 3, 'reddit' => 2, 'kalshi_trades' => 1];
+    // Headline: fits the drop first, then score, then source (ESPN fight > plays > news > ESPN news > trades).
+    $prio = ['espn' => 5, 'espn_plays' => 4, 'news' => 3, 'espn_news' => 2, 'kalshi_trades' => 1];
     $rank = ['supports' => 2, 'neutral' => 1, 'contradicts' => 0];
     // (score ≥ 2 leaves out pure context like "fight hadn't started" or "no trades between scans")
     $candidates = array_values(array_filter($items, fn($i) => $i['stance'] !== 'contradicts' && ($i['score'] >= 2 || $i['source'] === 'news')));
-    usort($candidates, fn($a, $b) => [$rank[$b['stance']], $b['score'], $prio[$b['source']]]
-                                 <=> [$rank[$a['stance']], $a['score'], $prio[$a['source']]]);
+    // Something that happened within 30 min of the drop (a knockdown, the result) beats older news.
+    // Trades show *how* the price moved, not *why*, so they don't get that boost.
+    $dropTs = strtotime((string) $row['detected_at']);
+    $near   = fn(array $i) => (int) ($i['source'] !== 'kalshi_trades' && $i['at'] && abs(strtotime($i['at']) - $dropTs) <= 1800);
+    usort($candidates, fn($a, $b) => [$rank[$b['stance']], $near($b), $b['score'], $prio[$b['source']]]
+                                 <=> [$rank[$a['stance']], $near($a), $a['score'], $prio[$a['source']]]);
     $out['headline'] = $candidates[0] ?? null;
 
     $items[] = [

@@ -65,7 +65,7 @@ $select = function (string $name, array $options, string $value, ?string $form =
     }
     return $html . '</select>';
 };
-$scopes     = ['news' => 'News articles', 'live' => 'Live posts (X / Reddit)', 'both' => 'Both'];
+$scopes     = ['news' => 'TheNewsAPI + ESPN', 'live' => 'ESPN only (live phrases)', 'both' => 'TheNewsAPI + ESPN'];
 $polarities = ['neutral' => 'Neutral', 'good' => 'Good for fighter', 'bad' => 'Bad for fighter'];
 
 $freq = chart_keyword_freq(null, null, 1000);
@@ -81,9 +81,9 @@ page_header('Keywords', $admin);
 <h1>Keyword rules</h1>
 <p class="muted">An article's score is the sum of the scores of every active <b>news</b> keyword found in its title or description
     (whole-word, case-insensitive). Articles scoring 0 are discarded; only the highest-scoring article is saved for a movement.</p>
-<p class="muted"><b>Live</b> keywords score X and Reddit posts. Their polarity is for the fighter the post is about
-    (the closest name before the phrase): “Talbott looks sharp” is good for Talbott, so it fits a drop in his opponent's price,
-    not his own. A post only counts when it fits the direction of the drop.</p>
+<p class="muted"><b>ESPN news</b> is scored with every active keyword. <b>Polarity</b> says whether a phrase is good or bad
+    for the fighter it's about (the closest name before it): “Talbott withdraws” is bad for Talbott, so it fits a drop in his
+    YES price; “Talbott looks sharp” points the other way. <i>ESPN only</i> keywords are live-fight phrases that TheNewsAPI ignores.</p>
 
 <section class="card">
     <h2>Add keyword</h2>

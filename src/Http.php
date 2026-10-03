@@ -9,7 +9,7 @@ final class HttpException extends RuntimeException
     }
 }
 
-/** Small cURL wrapper for the evidence sources (X, Reddit, ESPN). */
+/** Small cURL wrapper for ESPN's JSON. */
 final class Http
 {
     /**

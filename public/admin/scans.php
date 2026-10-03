@@ -60,14 +60,13 @@ page_header('Scans', $admin);
     <div><span>News lookback</span><b><?= NEWS_LOOKBACK_HOURS ?>h</b></div>
 </div>
 
-<?php $live = evidence_sources_configured(); $xSpent = (new XClient(db()))->spentThisMonth(); ?>
+<?php $live = evidence_sources_configured();
+$espnAt = db()->query("SELECT MAX(espn_checked_at) FROM events")->fetchColumn(); ?>
 <div class="stat-chips">
-    <div><span>ESPN</span><b><?= $live['espn'] ? 'on' : 'off' ?></b></div>
+    <div><span>ESPN (fight, plays, news)</span><b><?= $live['espn'] ? 'on · no key needed' : 'off' ?></b></div>
+    <div><span>ESPN fight info</span><b><?= $espnAt ? 'updated ' . reltime($espnAt) : 'not fetched yet' ?></b></div>
     <div><span>Kalshi trades</span><b><?= $live['kalshi_trades'] ? 'on' : 'off' ?></b></div>
-    <div><span>Reddit</span><b><?= $live['reddit'] ? 'r/' . e(REDDIT_SUBREDDIT) : 'not set up' ?></b></div>
-    <div><span>X</span><b><?= $live['x'] ? X_MAX_POSTS . ' posts per drop' : 'not set up' ?></b></div>
-    <div><span>X spend · this month</span><b>$<?= number_format($xSpent, 2) ?> of $<?= number_format(X_MONTHLY_BUDGET, 2) ?></b></div>
-    <div><span>Live window</span><b>previous scan − <?= LIVE_LOOKBACK_MINUTES ?> min</b></div>
+    <div><span>Play-by-play window</span><b>previous scan − <?= LIVE_LOOKBACK_MINUTES ?> min</b></div>
 </div>
 
 <section class="card">
