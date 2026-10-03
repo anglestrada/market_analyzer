@@ -1,5 +1,10 @@
 {
     "require": {
+        "php": ">=8.2",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-pdo_pgsql": "*",
+        "phpseclib/phpseclib": "~3.0",
         "symfony/dotenv": "^8.1"
     }
 }
