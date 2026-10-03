@@ -5,7 +5,7 @@
 ## Supporting phpseclib
 
 - [Become a backer or sponsor on Patreon](https://www.patreon.com/phpseclib)
-- [One-time donation via PayPal or crypto-currencies](http://sourceforge.net/donate/index.php?group_id=198487)
+- [One-time donation via PayPal or crypto-currencies](http://sourceforge.net/donate/public/index.php?group_id=198487)
 - [Subscribe to Tidelift](https://tidelift.com/subscription/pkg/packagist-phpseclib-phpseclib?utm_source=packagist-phpseclib-phpseclib&utm_medium=referral&utm_campaign=readme)
 
 ## Introduction
