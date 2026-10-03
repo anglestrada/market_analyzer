@@ -60,6 +60,16 @@ page_header('Scans', $admin);
     <div><span>News lookback</span><b><?= NEWS_LOOKBACK_HOURS ?>h</b></div>
 </div>
 
+<?php $live = evidence_sources_configured(); $xSpent = (new XClient(db()))->spentThisMonth(); ?>
+<div class="stat-chips">
+    <div><span>ESPN</span><b><?= $live['espn'] ? 'on' : 'off' ?></b></div>
+    <div><span>Kalshi trades</span><b><?= $live['kalshi_trades'] ? 'on' : 'off' ?></b></div>
+    <div><span>Reddit</span><b><?= $live['reddit'] ? 'r/' . e(REDDIT_SUBREDDIT) : 'not set up' ?></b></div>
+    <div><span>X</span><b><?= $live['x'] ? X_MAX_POSTS . ' posts per drop' : 'not set up' ?></b></div>
+    <div><span>X spend · this month</span><b>$<?= number_format($xSpent, 2) ?> of $<?= number_format(X_MONTHLY_BUDGET, 2) ?></b></div>
+    <div><span>Live window</span><b>previous scan − <?= LIVE_LOOKBACK_MINUTES ?> min</b></div>
+</div>
+
 <section class="card">
     <div class="card-head"><h2>Scan health · last 48 hours</h2><span class="muted small">dots: <span class="up">completed</span> · <span class="amber-text">partial</span> · <span class="down">failed</span></span></div>
     <div class="chart-box h-260"><canvas data-chart="scanHealth" data-source="d-health" data-empty="No scans in the last 48 hours."></canvas></div>

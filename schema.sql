@@ -192,6 +192,55 @@ CREATE INDEX IF NOT EXISTS keywords_active_idx ON keywords (is_active);
 CREATE OR REPLACE TRIGGER keywords_updated_at BEFORE UPDATE ON keywords
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- scope:    news = TheNewsAPI articles · live = X / Reddit posts · both
+-- polarity: good / bad for the fighter the text is about (live posts only; news ignores it)
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS scope    TEXT NOT NULL DEFAULT 'news';
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS polarity TEXT NOT NULL DEFAULT 'neutral';
+DO $$ BEGIN
+    ALTER TABLE keywords ADD CONSTRAINT keywords_scope_chk CHECK (scope IN ('news', 'live', 'both'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE keywords ADD CONSTRAINT keywords_polarity_chk CHECK (polarity IN ('good', 'bad', 'neutral'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ---------------------------------------------------------------------
+-- movement_evidence (best result per extra source for each drop; news stays in movement_analysis)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS movement_evidence (
+    id                BIGSERIAL PRIMARY KEY,
+    movement_id       BIGINT      NOT NULL REFERENCES market_movements (id) ON DELETE CASCADE,
+    source            TEXT        NOT NULL CHECK (source IN ('x', 'reddit', 'kalshi_trades', 'espn')),
+    status            TEXT        NOT NULL CHECK (status IN ('found', 'none', 'failed', 'skipped')),
+    stance            TEXT        NOT NULL DEFAULT 'neutral'
+                      CHECK (stance IN ('supports', 'contradicts', 'neutral')),
+    score             INTEGER     NOT NULL DEFAULT 0 CHECK (score >= 0),
+    occurred_at       TIMESTAMPTZ,
+    headline          TEXT,
+    detail            TEXT,
+    url               TEXT,
+    item_count        INTEGER     NOT NULL DEFAULT 0 CHECK (item_count >= 0),
+    matched_keywords  JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    error_message     TEXT,
+    attempts          INTEGER     NOT NULL DEFAULT 1,
+    raw_data          JSONB,
+    collected_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (movement_id, source)
+);
+CREATE INDEX IF NOT EXISTS evidence_status_idx ON movement_evidence (status, collected_at);
+
+-- ---------------------------------------------------------------------
+-- api_usage (paid API calls, for the X monthly budget)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_usage (
+    id           BIGSERIAL PRIMARY KEY,
+    source       TEXT          NOT NULL,
+    movement_id  BIGINT        REFERENCES market_movements (id) ON DELETE SET NULL,
+    items        INTEGER       NOT NULL DEFAULT 0 CHECK (items >= 0),
+    cost_usd     NUMERIC(10,4) NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS api_usage_source_time_idx ON api_usage (source, created_at DESC);
+
 -- ---------------------------------------------------------------------
 -- watchlist_items (private, per user, per market)
 -- ---------------------------------------------------------------------
@@ -237,6 +286,61 @@ INSERT INTO keywords (keyword, score, category) VALUES
     ('training camp',    4, 'training'),
     ('sparring',         4, 'training'),
     ('interview',        2, 'commentary')
+ON CONFLICT ((LOWER(keyword))) DO NOTHING;
+
+-- Live-fight phrases for X / Reddit posts. Polarity is for the fighter the post is about:
+-- "Talbott looks sharp" → good for Talbott; "Talbott got rocked" → bad for Talbott.
+INSERT INTO keywords (keyword, score, category, scope, polarity) VALUES
+    -- good for the fighter
+    ('sharp',                 4, 'live: striking',  'live', 'good'),
+    ('looks great',           4, 'live: form',      'live', 'good'),
+    ('dominating',            6, 'live: control',   'live', 'good'),
+    ('dominant',              5, 'live: control',   'live', 'good'),
+    ('won the round',         6, 'live: rounds',    'live', 'good'),
+    ('won the first',         6, 'live: rounds',    'live', 'good'),
+    ('10-8',                  7, 'live: rounds',    'live', 'good'),
+    ('dropped him',           8, 'live: damage',    'live', 'good'),
+    ('knocked him down',      8, 'live: damage',    'live', 'good'),
+    ('rocked him',            7, 'live: damage',    'live', 'good'),
+    ('hurt him',              7, 'live: damage',    'live', 'good'),
+    ('busted him up',         6, 'live: damage',    'live', 'good'),
+    ('lighting him up',       6, 'live: striking',  'live', 'good'),
+    ('landing at will',       6, 'live: striking',  'live', 'good'),
+    ('picking him apart',     6, 'live: striking',  'live', 'good'),
+    ('in control',            4, 'live: control',   'live', 'good'),
+    ('cruising',              5, 'live: control',   'live', 'good'),
+    ('taking over',           5, 'live: control',   'live', 'good'),
+    ('stuffed the takedown',  4, 'live: grappling', 'live', 'good'),
+    ('stuffing takedowns',    4, 'live: grappling', 'live', 'good'),
+    ('looks huge',            3, 'live: weigh-in',  'live', 'good'),
+    ('made weight',           3, 'live: weigh-in',  'live', 'good'),
+    -- bad for the fighter
+    ('lost the first round',  7, 'live: rounds',    'live', 'bad'),
+    ('lost the round',        6, 'live: rounds',    'live', 'bad'),
+    ('down two rounds',       7, 'live: rounds',    'live', 'bad'),
+    ('not doing enough',      6, 'live: form',      'live', 'bad'),
+    ('slow start',            4, 'live: form',      'live', 'bad'),
+    ('looks flat',            5, 'live: form',      'live', 'bad'),
+    ('looks tired',           6, 'live: cardio',    'live', 'bad'),
+    ('gassed',                7, 'live: cardio',    'live', 'bad'),
+    ('gassing',               6, 'live: cardio',    'live', 'bad'),
+    ('fading',                5, 'live: cardio',    'live', 'bad'),
+    ('got rocked',            8, 'live: damage',    'live', 'bad'),
+    ('got dropped',           9, 'live: damage',    'live', 'bad'),
+    ('got knocked down',      9, 'live: damage',    'live', 'bad'),
+    ('is hurt',               7, 'live: damage',    'live', 'bad'),
+    ('badly cut',             6, 'live: damage',    'live', 'bad'),
+    ('cut open',              6, 'live: damage',    'live', 'bad'),
+    ('bleeding',              5, 'live: damage',    'live', 'bad'),
+    ('doctor',                5, 'live: damage',    'live', 'bad'),
+    ('eye poke',              4, 'live: fouls',     'live', 'bad'),
+    ('point deducted',        6, 'live: fouls',     'live', 'bad'),
+    ('point deduction',       6, 'live: fouls',     'live', 'bad'),
+    ('taken down',            4, 'live: grappling', 'live', 'bad'),
+    ('getting outstruck',     6, 'live: striking',  'live', 'bad'),
+    ('getting picked apart',  6, 'live: striking',  'live', 'bad'),
+    ('getting controlled',    5, 'live: grappling', 'live', 'bad'),
+    ('missed weight',         7, 'weight',          'both', 'bad')
 ON CONFLICT ((LOWER(keyword))) DO NOTHING;
 
 COMMIT;

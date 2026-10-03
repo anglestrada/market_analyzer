@@ -247,6 +247,33 @@ a.news-title:hover { color: var(--accent); text-decoration: none; }
 .news-status.tone-warn b { color: var(--warn); }
 .news-status.tone-error b { color: var(--down); }
 
+/* evidence timeline */
+.tl-head { margin: var(--s2) 0 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.timeline { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border-strong); margin-left: 4px; }
+.tl-item { position: relative; display: grid; grid-template-columns: 64px 1fr; gap: var(--s2); padding: 0 0 var(--s3) var(--s3); font-size: 13px; }
+.tl-item::before { content: ""; position: absolute; left: -4px; top: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+.tl-item.is-drop::before { background: var(--down); }
+.tl-item time { color: var(--muted); font-size: 12px; padding-top: 1px; }
+.tl-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; min-width: 0; }
+.tl-text { color: var(--text); overflow-wrap: anywhere; }
+a.tl-text:hover { color: var(--accent); }
+.tl-detail { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+.src-chip { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; background: var(--surface-3); color: var(--text-2); white-space: nowrap; }
+.src-news { background: var(--info-soft); color: var(--info); }
+.src-espn { background: var(--down-soft); color: var(--down); }
+.src-x { background: var(--surface-3); color: var(--text); }
+.src-reddit { background: var(--warn-soft); color: var(--warn); }
+.src-kalshi_trades { background: var(--accent-soft); color: var(--accent); }
+.src-drop { background: var(--down-soft); color: var(--down); }
+.stance { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.stance-supports { color: var(--accent); }
+.stance-contradicts { color: var(--warn); }
+.checked { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); }
+.chk i { font-style: normal; color: var(--text-2); }
+.chk-found i, .chk-article_found i { color: var(--accent); }
+.chk-failed i, .chk-news_search_failed i { color: var(--warn); }
+.chk-not_configured { opacity: .6; }
+
 /* ---------- tables ---------- */
 .table-wrap { overflow-x: auto; margin: 0 calc(var(--s2) * -1); }
 .table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }

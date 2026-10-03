@@ -509,6 +509,7 @@
     const threshold = box.dataset.threshold || '5';
     const fmtWhen = new Intl.DateTimeFormat(undefined, { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const when = (iso) => (iso ? fmtWhen.format(new Date(iso)) : '—');
+    const fmtClock = new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: 'numeric', minute: '2-digit' });
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     const price = (v) => (v == null ? '—' : `${Number.isInteger(+v) ? +v : (+v).toFixed(1)}¢`);
     const pp = (v) => {
@@ -639,38 +640,70 @@
         : '';
       const dropText = a.drop ? `${a.drop.side.toUpperCase()} −${a.drop.pts.toFixed(1)} pp drop on ${when(a.drop.at)}` : '';
       const status = (tone, title, text) => `<div class="news-status${tone ? ` tone-${tone}` : ''}"><b>${title}</b><p>${text}</p></div>`;
+      const link = (text, url, cls = '') => (url
+        ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`
+        : `<span class="${cls}">${esc(text)}</span>`);
+      const kwList = (list) => (list || []).map((k) => `<span class="kw">${esc(k)}</span>`).join('');
 
-      if (a.status === 'article_found' && a.article) {
-        const art = a.article;
-        const title = art.url
-          ? `<a class="news-title" href="${esc(art.url)}" target="_blank" rel="noopener noreferrer">${esc(art.title)}</a>`
-          : `<span class="news-title">${esc(art.title)}</span>`;
-        const kws = (a.keywords || []).map((k) => `<span class="kw">${esc(k)}</span>`).join('') || '—';
+      // Evidence timeline: best item per source + the drop, in time order.
+      const dropDay = a.drop ? new Date(a.drop.at).toDateString() : '';
+      const clock = (iso) => {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        return d.toDateString() === dropDay ? fmtClock.format(d) : when(iso);
+      };
+      const stance = (s) => ({
+        supports: '<span class="stance stance-supports" title="Fits the direction of the drop">fits</span>',
+        contradicts: '<span class="stance stance-contradicts" title="Points the other way">against</span>',
+      }[s] || '');
+      const items = a.timeline || [];
+      const timeline = items.length > 1 ? `
+        <h3 class="tl-head">Evidence timeline</h3>
+        <ol class="timeline">${items.map((i) => `
+          <li class="tl-item tl-${esc(i.source)}${i.source === 'drop' ? ' is-drop' : ''}">
+            <time class="num">${esc(clock(i.at))}</time>
+            <div class="tl-body">
+              <span class="src-chip src-${esc(i.source)}">${esc(i.label)}</span>${stance(i.stance)}
+              ${i.source === 'drop' ? `<b class="delta down">${esc(i.headline)}</b>` : link(i.headline, i.url, 'tl-text')}
+              ${i.detail ? `<span class="tl-detail">${esc(i.detail)}</span>` : ''}
+            </div>
+          </li>`).join('')}
+        </ol>` : '';
+      const CHECK = {
+        found: 'found', article_found: 'article', none: 'nothing', no_explanation_found: 'nothing',
+        failed: 'failed', news_search_failed: 'failed', skipped: 'skipped', pending: 'pending', not_configured: 'not set up',
+      };
+      const checked = (a.checked || []).length ? `<p class="checked">Checked: ${(a.checked).map((c) => `<span class="chk chk-${esc(c.status)}"${c.note ? ` title="${esc(c.note)}"` : ''}>${esc(c.label)} <i>${esc(CHECK[c.status] || c.status)}</i></span>`).join('')}</p>` : '';
+      const note = '<p class="news-note">Every item is a possible explanation; causation is unverified.</p>';
+
+      const h = a.headline;
+      if (h) {
+        const art = h.source === 'news' ? a.article : null;
         body.innerHTML = `
-          <span class="news-kicker">Possible explanation · score ${a.score}</span>
-          ${title}
-          <span class="news-meta">${esc(art.source || 'Unknown source')} · Published ${esc(when(art.published_at))}</span>
-          ${art.description ? `<p class="news-desc">${esc(art.description)}</p>` : ''}
+          <span class="news-kicker">Strongest · ${esc(h.label)} · score ${h.score}</span>
+          ${link(h.headline, h.url, 'news-title')}
+          <span class="news-meta">${art ? `${esc(art.source || 'Unknown source')} · Published ${esc(when(art.published_at))}` : esc(h.detail || '')}</span>
+          ${art?.description ? `<p class="news-desc">${esc(art.description)}</p>` : ''}
           <dl class="facts">
             <dt>Drop</dt><dd>${drop}</dd>
             <dt>Detected</dt><dd>${esc(when(a.drop?.at))}</dd>
-            <dt>Matched keywords</dt><dd><span class="kw-list">${kws}</span></dd>
-            <dt>Relevance score</dt><dd>${a.score} point${a.score === 1 ? '' : 's'}</dd>
+            ${(h.keywords || []).length ? `<dt>Matched keywords</dt><dd><span class="kw-list">${kwList(h.keywords)}</span></dd>` : ''}
             ${a.drops > 1 ? `<dt>Drops recorded</dt><dd>${a.drops}</dd>` : ''}
           </dl>
-          <p class="news-note">Highest-scoring article from the 48 hours before a drop. Possible explanation; causation is unverified.</p>`;
+          ${timeline}${checked}${note}`;
         return;
       }
       if (a.status === 'no_explanation_found') {
         body.innerHTML = status('', 'No explanation found',
-          `No article matched the keyword rules in the 48 hours before the ${esc(dropText)}.`)
+          `Nothing matched the keyword rules for the ${esc(dropText)}.`)
+          + timeline + checked
           + '<p class="news-note">This doesn\'t rule out a cause. The keyword rules may not cover it.</p>';
       } else if (a.status === 'news_search_failed') {
         body.innerHTML = status('warn', 'News search failed',
-          `The search for the ${esc(dropText)} didn't complete. It is retried automatically on the next scan.`);
+          `The search for the ${esc(dropText)} didn't complete. It is retried automatically on the next scan.`) + timeline + checked;
       } else if (a.status === 'pending') {
         body.innerHTML = status('', 'Analysis pending',
-          `A ${esc(dropText)} was detected. The news search runs at the end of the scan.`);
+          `A ${esc(dropText)} was detected. The searches run at the end of the scan.`) + timeline + checked;
       } else {
         body.innerHTML = status('', 'No significant drop yet',
           `News is searched only after YES or NO falls by at least ${esc(threshold)} pp between two scans. ${market.status === 'open' ? 'This market hasn\'t had one yet.' : 'This market never had one.'}`);

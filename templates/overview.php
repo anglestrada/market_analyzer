@@ -22,12 +22,16 @@ $newsLabel = [
     'news_search_failed'   => ['Search failed', 'warn'],
     'pending'              => ['Analysis pending', 'info'],
 ];
-$newsCell = function (?string $status) use ($newsLabel): string {
+$newsCell = function (?string $status, int $live = 0) use ($newsLabel): string {
     if ($status === null) {
         return '<span class="status status-none">No drop</span>';
     }
+    if ($status !== 'article_found' && $live > 0) {
+        return '<span class="status status-ok">' . $live . ' live source' . ($live === 1 ? '' : 's') . '</span>';
+    }
     [$label, $tone] = $newsLabel[$status] ?? [$status, 'muted'];
-    return '<span class="status status-' . $tone . '">' . e($label) . '</span>';
+    return '<span class="status status-' . $tone . '">' . e($label) . '</span>'
+        . ($live > 0 ? ' <span class="cell-sub">+ ' . $live . ' live</span>' : '');
 };
 $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c) ? 0 : 1) . '¢';
 ?>
@@ -150,7 +154,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
     </div>
 
     <aside class="news" data-el="news" aria-live="polite">
-        <p class="eyebrow">News context</p>
+        <p class="eyebrow">Possible explanations</p>
         <div class="news-body" data-el="news-body">
             <span class="skeleton w-80"></span><span class="skeleton w-60"></span><span class="skeleton w-40"></span>
         </div>
@@ -180,7 +184,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                 <th class="num col-no">NO</th>
                 <th class="num">Drop</th>
                 <th class="num col-detected">Detected</th>
-                <th class="col-news">News</th>
+                <th class="col-news">Explanation</th>
             </tr></thead>
             <tbody>
             <?php foreach ($drops as $d): $mid = (int) $d['market_id']; ?>
@@ -196,7 +200,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                         <span class="delta down" title="<?= e(strtoupper($d['dropped_side'])) ?> fell <?= e(number_format((float) $d['drop_percentage_points'], 1)) ?> percentage points">−<?= e(number_format((float) $d['drop_percentage_points'], 1)) ?> pp</span>
                     </td>
                     <td class="num col-detected"><?= e(fmt_time($d['detected_at'], 'M j, g:i A')) ?></td>
-                    <td class="col-news"><?= $newsCell($d['explanation_status'] ?? 'pending') ?></td>
+                    <td class="col-news"><?= $newsCell($d['explanation_status'] ?? 'pending', (int) ($d['ev_found'] ?? 0)) ?></td>
                 </tr>
             <?php endforeach; ?>
             </tbody>

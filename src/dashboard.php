@@ -172,10 +172,20 @@ function market_payload(int $id, string $range, int $userId): ?array
     ];
 }
 
+/** Which live sources the current .env turns on (web side; mirrors EvidenceCollector::enabledSources). */
+function evidence_sources_configured(): array
+{
+    return [
+        'espn'          => ESPN_ENABLED,
+        'x'             => (bool) X_BEARER_TOKEN,
+        'reddit'        => REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET,
+        'kalshi_trades' => KALSHI_TRADES_ENABLED,
+    ];
+}
+
 /**
- * Highest-scoring saved article across this market's drops. If no drop has an article,
- * returns the latest drop's status (no_explanation_found / news_search_failed / pending),
- * or status "none" when the market has never dropped ≥ 5 pp.
+ * The best-explained drop on this market: the one with the strongest supporting item from any source
+ * (news article or live evidence), else the latest drop. Status "none" when the market never dropped ≥ 5 pp.
  */
 function market_best_explanation(int $marketId): array
 {
@@ -186,35 +196,63 @@ function market_best_explanation(int $marketId): array
         return ['status' => 'none', 'drops' => 0];
     }
 
-    $base = 'SELECT mm.detected_at, mm.dropped_side, mm.drop_percentage_points, mm.previous_price, mm.current_price,
-                    COALESCE(ma.explanation_status, \'pending\') AS status, ma.relevance_score, ma.matched_keywords,
-                    a.title, a.url, a.description, a.source_name, a.published_at
-               FROM market_movements mm
-          LEFT JOIN movement_analysis ma ON ma.movement_id = mm.id
-          LEFT JOIN articles a ON a.id = ma.article_id
-              WHERE mm.market_id = :m';
-
-    $q = db()->prepare($base . " AND ma.explanation_status = 'article_found'
-                                 ORDER BY ma.relevance_score DESC, mm.detected_at DESC LIMIT 1");
+    $q = db()->prepare(
+        "SELECT mm.id
+           FROM market_movements mm
+      LEFT JOIN movement_analysis ma ON ma.movement_id = mm.id
+      LEFT JOIN LATERAL (SELECT MAX(score) AS s FROM movement_evidence ev
+                          WHERE ev.movement_id = mm.id AND ev.status = 'found' AND ev.stance = 'supports') ev ON TRUE
+          WHERE mm.market_id = :m
+       ORDER BY GREATEST(CASE WHEN ma.explanation_status = 'article_found' THEN ma.relevance_score ELSE 0 END,
+                         COALESCE(ev.s, 0)) DESC,
+                mm.detected_at DESC
+          LIMIT 1"
+    );
     $q->execute([':m' => $marketId]);
+    return movement_explanation((int) $q->fetchColumn()) + ['drops' => $drops];
+}
+
+/**
+ * Evidence timeline for one drop:
+ *   headline = the strongest item that fits the drop (any source)
+ *   timeline = the best item from each source plus the drop itself, in time order
+ *   checked  = what every source returned, including "nothing found" / "failed" / "not configured"
+ */
+function movement_explanation(int $movementId): array
+{
+    $q = db()->prepare(
+        "SELECT mm.id, mm.detected_at, mm.dropped_side, mm.drop_percentage_points, mm.previous_price, mm.current_price,
+                COALESCE(ma.explanation_status, 'pending') AS status, ma.relevance_score, ma.matched_keywords,
+                a.title, a.url, a.description, a.source_name, a.published_at
+           FROM market_movements mm
+      LEFT JOIN movement_analysis ma ON ma.movement_id = mm.id
+      LEFT JOIN articles a ON a.id = ma.article_id
+          WHERE mm.id = :id"
+    );
+    $q->execute([':id' => $movementId]);
     $row = $q->fetch();
     if (!$row) {
-        $q = db()->prepare($base . ' ORDER BY mm.detected_at DESC LIMIT 1');
-        $q->execute([':m' => $marketId]);
-        $row = $q->fetch();
+        return ['status' => 'none', 'drops' => 0];
     }
 
-    $out = [
+    $side = strtoupper($row['dropped_side']);
+    $pts  = (float) $row['drop_percentage_points'];
+    $out  = [
         'status' => $row['status'],
-        'drops'  => $drops,
         'drop'   => [
             'at'   => iso($row['detected_at']),
             'side' => $row['dropped_side'],
-            'pts'  => (float) $row['drop_percentage_points'],
+            'pts'  => $pts,
             'from' => cents_or_null($row['previous_price']),
             'to'   => cents_or_null($row['current_price']),
         ],
     ];
+
+    $items   = [];
+    $checked = [];
+
+    // News (TheNewsAPI)
+    $checked[] = ['source' => 'news', 'label' => SOURCE_LABELS['news'], 'status' => $row['status'], 'note' => null];
     if ($row['status'] === 'article_found') {
         $out['article'] = [
             'title'        => $row['title'],
@@ -225,6 +263,79 @@ function market_best_explanation(int $marketId): array
         ];
         $out['score']    = (int) $row['relevance_score'];
         $out['keywords'] = json_decode((string) $row['matched_keywords'], true) ?: [];
+        $items[] = [
+            'source'   => 'news',
+            'label'    => SOURCE_LABELS['news'],
+            'at'       => iso($row['published_at']),
+            'headline' => $row['title'],
+            'detail'   => trim(($row['source_name'] ?: 'Unknown source') . ' · score ' . (int) $row['relevance_score']),
+            'url'      => safe_external_url($row['url']),
+            // keyword scores aren't directional; a confident match counts as fitting the drop
+            'stance'   => (int) $row['relevance_score'] >= NEWS_CONFIDENT_SCORE ? 'supports' : 'neutral',
+            'score'    => (int) $row['relevance_score'],
+            'keywords' => $out['keywords'],
+            'count'    => 1,
+        ];
+    }
+
+    // Live sources
+    $ev = db()->prepare('SELECT * FROM movement_evidence WHERE movement_id = :m');
+    $ev->execute([':m' => $movementId]);
+    $bySource = [];
+    foreach ($ev->fetchAll() as $e) {
+        $bySource[$e['source']] = $e;
+    }
+    foreach (evidence_sources_configured() as $src => $on) {
+        $e = $bySource[$src] ?? null;
+        if ($e === null) {
+            $checked[] = ['source' => $src, 'label' => SOURCE_LABELS[$src], 'status' => $on ? 'pending' : 'not_configured', 'note' => null];
+            continue;
+        }
+        $checked[] = [
+            'source' => $src,
+            'label'  => SOURCE_LABELS[$src],
+            'status' => $e['status'],
+            'note'   => $e['status'] === 'failed' ? $e['error_message'] : ($e['status'] !== 'found' ? $e['detail'] : null),
+        ];
+        if ($e['status'] !== 'found') {
+            continue;
+        }
+        $items[] = [
+            'source'   => $src,
+            'label'    => SOURCE_LABELS[$src],
+            'at'       => iso($e['occurred_at'] ?? $e['collected_at']),
+            'headline' => $e['headline'],
+            'detail'   => $e['detail'],
+            'url'      => safe_external_url($e['url']),
+            'stance'   => $e['stance'],
+            'score'    => (int) $e['score'],
+            'keywords' => json_decode((string) $e['matched_keywords'], true) ?: [],
+            'count'    => (int) $e['item_count'],
+        ];
+    }
+
+    // Headline: fits the drop first, then score, then source (ESPN > news > X > Reddit > trades).
+    $prio = ['espn' => 5, 'news' => 4, 'x' => 3, 'reddit' => 2, 'kalshi_trades' => 1];
+    $rank = ['supports' => 2, 'neutral' => 1, 'contradicts' => 0];
+    // (score ≥ 2 leaves out pure context like "fight hadn't started" or "no trades between scans")
+    $candidates = array_values(array_filter($items, fn($i) => $i['stance'] !== 'contradicts' && ($i['score'] >= 2 || $i['source'] === 'news')));
+    usort($candidates, fn($a, $b) => [$rank[$b['stance']], $b['score'], $prio[$b['source']]]
+                                 <=> [$rank[$a['stance']], $a['score'], $prio[$a['source']]]);
+    $out['headline'] = $candidates[0] ?? null;
+
+    $items[] = [
+        'source' => 'drop', 'label' => 'Drop', 'at' => iso($row['detected_at']),
+        'headline' => sprintf('%s −%s pp (%s¢ → %s¢)', $side, number_format($pts, 1),
+            rtrim(rtrim(number_format((float) $row['previous_price'] * 100, 1), '0'), '.'),
+            rtrim(rtrim(number_format((float) $row['current_price'] * 100, 1), '0'), '.')),
+        'detail' => null, 'url' => null, 'stance' => 'neutral', 'score' => 0, 'keywords' => [], 'count' => 0,
+    ];
+    usort($items, fn($a, $b) => [strtotime((string) $a['at']), $a['source'] === 'drop'] <=> [strtotime((string) $b['at']), $b['source'] === 'drop']);
+
+    $out['timeline'] = $items;
+    $out['checked']  = $checked;
+    if ($out['status'] !== 'article_found' && $out['headline'] !== null) {
+        $out['status'] = 'evidence_found';
     }
     return $out;
 }
