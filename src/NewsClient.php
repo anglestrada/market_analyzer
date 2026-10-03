@@ -1,44 +1,63 @@
 <?php
 declare(strict_types=1);
 
-final class NewsApiException extends RuntimeException {}
+final class NewsApiException extends RuntimeException
+{
+    public function __construct(string $message, public readonly int $httpStatus = 0, public readonly string $apiCode = '')
+    {
+        parent::__construct($message, $httpStatus);
+    }
+}
 
-/** Minimal NewsAPI /v2/everything client. */
+/**
+ * TheNewsAPI client — GET https://api.thenewsapi.com/v1/news/all
+ * Results are sorted by TheNewsAPI's relevance_score and fetched one page (3 articles on the free plan) at a time.
+ */
 final class NewsClient
 {
-    public function __construct(private ?string $apiKey = null)
+    public function __construct(private ?string $token = null)
     {
-        $this->apiKey ??= NEWSAPI_KEY;
+        $this->token ??= NEWS_API_TOKEN;
+    }
+
+    public function isConfigured(): bool
+    {
+        return (bool) $this->token;
     }
 
     /**
-     * @return array<int, array> raw NewsAPI article objects
+     * One page of results, most relevant first.
+     *
+     * @param string[] $phrases e.g. ["Payton Talbott", "Raul Rosas Jr."] — any of them may match
+     * @return array{articles: array<int, array>, found: int, page: int}
      */
-    public function search(string $query, DateTimeInterface $from, DateTimeInterface $to): array
+    public function search(array $phrases, DateTimeInterface $from, DateTimeInterface $to, int $page = 1, int $limit = NEWS_PAGE_SIZE): array
     {
-        if (!$this->apiKey) {
-            throw new NewsApiException('NEWSAPI_KEY is not set.');
+        if (!$this->token) {
+            throw new NewsApiException('THENEWSAPI_TOKEN is not set in .env.');
         }
 
+        $utc    = new DateTimeZone('UTC');
         $params = [
-            'q'        => mb_substr($query, 0, 500),
-            'searchIn' => 'title,description',
-            'from'     => $from->format('Y-m-d\TH:i:s'),
-            'to'       => $to->format('Y-m-d\TH:i:s'),
-            'language' => 'en',
-            'sortBy'   => 'publishedAt',
-            'pageSize' => 100,
+            'api_token'        => $this->token,
+            'search'           => self::orQuery($phrases),
+            'language'         => 'en',
+            'published_after'  => DateTimeImmutable::createFromInterface($from)->setTimezone($utc)->format('Y-m-d\TH:i:s'),
+            'published_before' => DateTimeImmutable::createFromInterface($to)->setTimezone($utc)->format('Y-m-d\TH:i:s'),
+            'sort'             => 'relevance_score',
+            'limit'            => max(1, $limit),
+            'page'             => max(1, $page),
         ];
 
-        $ch = curl_init(NEWSAPI_BASE_URL . '/everything?' . http_build_query($params));
+        $ch = curl_init(NEWS_API_BASE_URL . '/news/all?' . http_build_query($params));
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER     => ['X-Api-Key: ' . $this->apiKey, 'Accept: application/json'],
+            CURLOPT_HTTPHEADER     => ['Accept: application/json'],
             CURLOPT_TIMEOUT        => 20,
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_USERAGENT      => 'KalshiMarketAnalyzer/1.0',
         ]);
-       if ($ca = env('CA_BUNDLE')) {
+        if ($ca = env('CA_BUNDLE')) {
             curl_setopt($ch, CURLOPT_CAINFO, $ca);
         } elseif (defined('CURLSSLOPT_NATIVE_CA')) {
             curl_setopt($ch, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
@@ -48,18 +67,57 @@ final class NewsClient
         $err    = curl_error($ch);
 
         if ($body === false) {
-            throw new NewsApiException("NewsAPI request failed: $err");
+            throw new NewsApiException("TheNewsAPI request failed: $err");
         }
         $data = json_decode((string) $body, true);
-        if ($status >= 400 || !is_array($data) || ($data['status'] ?? '') !== 'ok') {
-            $msg = is_array($data) ? ($data['message'] ?? 'unknown error') : 'invalid JSON';
-            throw new NewsApiException("NewsAPI HTTP $status: $msg");
+        if ($status >= 400 || !is_array($data) || isset($data['error'])) {
+            $code = is_array($data) ? (string) ($data['error']['code'] ?? '') : '';
+            $msg  = is_array($data) ? (string) ($data['error']['message'] ?? 'unknown error') : 'invalid JSON';
+            $hint = match ($code) {
+                'usage_limit_reached', 'rate_limit_reached' => ' (daily/plan limit reached; retried on a later scan)',
+                'invalid_api_token'                         => ' (check THENEWSAPI_TOKEN in .env)',
+                default                                     => '',
+            };
+            throw new NewsApiException("TheNewsAPI HTTP $status" . ($code ? " $code" : '') . ": $msg$hint", $status, $code);
         }
 
-        // NewsAPI replaces taken-down items with "[Removed]".
-        return array_values(array_filter(
-            $data['articles'] ?? [],
-            fn($a) => !empty($a['url']) && ($a['title'] ?? '') !== '[Removed]'
-        ));
+        $articles = [];
+        foreach ($data['data'] ?? [] as $a) {
+            if (empty($a['url']) || empty($a['title'])) {
+                continue;
+            }
+            $articles[] = [
+                'uuid'            => $a['uuid'] ?? null,
+                'title'           => (string) $a['title'],
+                'description'     => (string) ($a['description'] ?? ''),
+                'snippet'         => (string) ($a['snippet'] ?? ''),
+                'keywords'        => (string) ($a['keywords'] ?? ''),
+                'url'             => (string) $a['url'],
+                'source_name'     => $a['source'] ?? null,
+                'published_at'    => $a['published_at'] ?? null,
+                'relevance_score' => isset($a['relevance_score']) ? (float) $a['relevance_score'] : null,
+                'raw'             => $a,
+            ];
+        }
+
+        return [
+            'articles' => $articles,
+            'found'    => (int) ($data['meta']['found'] ?? count($articles)),
+            'page'     => (int) ($data['meta']['page'] ?? $page),
+        ];
+    }
+
+    /** ["Payton Talbott", "Raul Rosas"] → "Payton Talbott" | "Raul Rosas" (TheNewsAPI: | = OR, quotes = phrase). */
+    public static function orQuery(array $phrases): string
+    {
+        $parts = [];
+        foreach ($phrases as $p) {
+            $p = trim(preg_replace('/["|+\-()*]/', ' ', (string) $p));
+            $p = preg_replace('/\s+/', ' ', $p);
+            if ($p !== '') {
+                $parts[] = '"' . $p . '"';
+            }
+        }
+        return implode(' | ', array_unique($parts));
     }
 }

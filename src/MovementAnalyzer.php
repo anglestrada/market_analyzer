@@ -2,12 +2,23 @@
 declare(strict_types=1);
 
 /**
- * Searches NewsAPI for a movement and stores the single best-scoring article.
- * Scoring is deterministic: sum of scores of active keywords found in title + description.
+ * Finds a possible explanation for a price drop using TheNewsAPI.
+ *
+ *   movement (≥ threshold) → search TheNewsAPI, sorted by relevance
+ *     → score the top 3 with the keyword rules
+ *     → enough to identify what happened?  YES → save the best article
+ *                                          NO  → request the next page (next 3), up to NEWS_MAX_PAGES
+ *     → after the last page: save the best article that scored > 0, else "no_explanation_found"
+ *
+ * "Enough" = an article that mentions a fighter in the bout and whose keyword score is ≥ NEWS_CONFIDENT_SCORE.
+ * Scoring is deterministic and explainable: the sum of the active keyword scores found in the article text.
  */
 final class MovementAnalyzer
 {
     private ?array $keywords = null;
+
+    /** Human-readable summary of the last analyze() call, for the scan log. */
+    public string $lastSummary = '';
 
     public function __construct(private PDO $db, private NewsClient $news) {}
 
@@ -28,62 +39,121 @@ final class MovementAnalyzer
             throw new RuntimeException("Movement $movementId not found");
         }
 
-        $to    = new DateTimeImmutable($mv['detected_at']);
-        $from  = $to->modify('-' . NEWS_LOOKBACK_HOURS . ' hours');
-        $query = $this->buildQuery($mv);
+        $to      = new DateTimeImmutable($mv['detected_at']);
+        $from    = $to->modify('-' . NEWS_LOOKBACK_HOURS . ' hours');
+        $names   = $this->fighterNames($mv);
+        $best    = null;
+        $seen    = [];
+        $checked = 0;
+        $pages   = 0;
+        $error   = null;
 
-        try {
-            $articles = $this->news->search($query, $from, $to);
-        } catch (Throwable $e) {
-            $this->saveAnalysis($movementId, null, 'news_search_failed', 0, [], ['query' => $query, 'error' => $e->getMessage()]);
-            throw $e;   // let the scanner mark the run as partial
+        for ($page = 1; $page <= NEWS_MAX_PAGES; $page++) {
+            try {
+                $result = $this->news->search($names, $from, $to, $page);
+            } catch (Throwable $e) {
+                $error = $e;
+                break;
+            }
+            $pages++;
+
+            foreach ($result['articles'] as $rank => $a) {
+                if (isset($seen[$a['url']])) {
+                    continue;
+                }
+                $seen[$a['url']] = true;
+                $checked++;
+
+                [$score, $matched] = $this->scoreArticle($a, $names);
+                if ($score <= 0) {
+                    continue;   // unrelated → discarded, never saved
+                }
+                $a['raw']['_analysis'] = ['page' => $page, 'rank' => $rank + 1, 'query' => NewsClient::orQuery($names)];
+                if ($best === null
+                    || $score > $best['score']
+                    || ($score === $best['score'] && ($a['relevance_score'] ?? 0) > ($best['article']['relevance_score'] ?? 0))) {
+                    $best = ['article' => $a, 'score' => $score, 'matched' => $matched];
+                }
+            }
+
+            $enough  = $best !== null && $best['score'] >= NEWS_CONFIDENT_SCORE;
+            $noMore  = count($result['articles']) < NEWS_PAGE_SIZE || $page * NEWS_PAGE_SIZE >= $result['found'];
+            if ($enough || $noMore) {
+                break;
+            }
         }
 
-        $best = null;
-        foreach ($articles as $a) {
-            [$score, $matched] = $this->score(($a['title'] ?? '') . ' ' . ($a['description'] ?? ''));
-            if ($score <= 0) {
-                continue;   // unrelated → discarded, never saved
-            }
-            if ($best === null
-                || $score > $best['score']
-                || ($score === $best['score'] && ($a['publishedAt'] ?? '') > ($best['article']['publishedAt'] ?? ''))) {
-                $best = ['article' => $a, 'score' => $score, 'matched' => $matched];
-            }
+        $where = "$checked article" . ($checked === 1 ? '' : 's') . " on $pages page" . ($pages === 1 ? '' : 's');
+
+        // The search failed before anything useful came back → retry on a later scan.
+        if ($error !== null && $best === null) {
+            $this->saveAnalysis($movementId, null, 'news_search_failed', 0, [], ['names' => $names, 'error' => $error->getMessage()]);
+            $this->lastSummary = 'news search failed: ' . $error->getMessage();
+            throw $error;   // lets the scanner mark the run as partial
         }
 
         if ($best === null) {
             $this->saveAnalysis($movementId, null, 'no_explanation_found', 0, []);
+            $this->lastSummary = "no explanation found ($where)";
             return 'no_explanation_found';
         }
 
         $articleId = $this->upsertArticle($best['article']);
         $this->saveAnalysis($movementId, $articleId, 'article_found', $best['score'], $best['matched']);
+        $confidence = $best['score'] >= NEWS_CONFIDENT_SCORE ? 'strong' : 'weak';
+        $this->lastSummary = sprintf('article found, score %d (%s match) after %s%s',
+            $best['score'], $confidence, $where, $error ? '; a later page failed' : '');
         return 'article_found';
     }
 
-    /** Search for both fighters in the bout, e.g. ("Islam Makhachev" OR "Jack Della Maddalena"). */
-    public function buildQuery(array $mv): string
+    /** Both fighters in the bout, e.g. ["Payton Talbott", "Raul Rosas Jr."]. */
+    public function fighterNames(array $mv): array
     {
         $stmt = $this->db->prepare('SELECT DISTINCT yes_subtitle FROM markets WHERE event_id = :e AND yes_subtitle IS NOT NULL');
         $stmt->execute([':e' => $mv['event_id']]);
         $names = array_column($stmt->fetchAll(), 'yes_subtitle');
-
         $names = array_filter(array_map('trim', $names), fn($n) =>
             mb_strlen($n) > 2 && !in_array(strtolower($n), ['yes', 'no'], true));
 
         if (!$names) {
-            // Fallback: "Gamrot vs Ribovics" → ["Gamrot", "Ribovics"]
-            $title = preg_replace('/\b(UFC.*|Fight Night.*)$/i', '', (string) $mv['event_title']);
+            // Fallback: "332: Figueiredo vs Talbott" → ["Figueiredo", "Talbott"]
+            $title = preg_replace('/^\s*\d+\s*:\s*|\s+—.*$|\b(UFC.*|Fight Night.*)$/iu', '', (string) $mv['event_title']);
             $names = array_filter(array_map('trim', preg_split('/\s+vs\.?\s+/i', $title)));
         }
         if (!$names) {
             $names = [(string) $mv['market_title']];
         }
+        return array_values(array_slice(array_unique($names), 0, 6));
+    }
 
-        $names  = array_slice(array_unique($names), 0, 6);
-        $quoted = array_map(fn($n) => '"' . str_replace('"', '', $n) . '"', $names);
-        return '(' . implode(' OR ', $quoted) . ')';
+    /**
+     * Keyword score for a TheNewsAPI article. An article that doesn't mention either fighter scores 0,
+     * so generic MMA news with the word "injury" isn't treated as an explanation.
+     *
+     * @return array{0:int,1:array<int,string>}
+     */
+    public function scoreArticle(array $a, array $names): array
+    {
+        $text = implode(' ', [$a['title'] ?? '', $a['description'] ?? '', $a['snippet'] ?? '', $a['keywords'] ?? '']);
+        if ($names && !$this->mentionsFighter($text, $names)) {
+            return [0, []];
+        }
+        return $this->score($text);
+    }
+
+    private function mentionsFighter(string $text, array $names): bool
+    {
+        foreach ($names as $n) {
+            // Full name, or the last name on its own ("Talbott"), ignoring suffixes like "Jr."
+            $parts = preg_split('/\s+/', trim(preg_replace('/\b(jr|sr|ii|iii)\.?$/i', '', $n)));
+            foreach (array_unique([trim($n), (string) end($parts)]) as $needle) {
+                if (mb_strlen($needle) >= 3
+                    && preg_match('/(?<![\p{L}\p{N}])' . preg_quote($needle, '/') . '(?![\p{L}\p{N}])/iu', $text)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** @return array{0:int,1:array<int,string>} */
@@ -118,11 +188,11 @@ final class MovementAnalyzer
         );
         $stmt->execute([
             ':url'   => $a['url'],
-            ':title' => $a['title'] ?? null,
-            ':descr' => $a['description'] ?? null,
-            ':src'   => $a['source']['name'] ?? null,
-            ':pub'   => $a['publishedAt'] ?? null,
-            ':raw'   => json_encode($a, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            ':title' => $a['title'] ?: null,
+            ':descr' => ($a['description'] ?: $a['snippet']) ?: null,
+            ':src'   => $a['source_name'] ?? null,
+            ':pub'   => $a['published_at'] ?? null,
+            ':raw'   => json_encode($a['raw'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         ]);
         return (int) $stmt->fetchColumn();
     }

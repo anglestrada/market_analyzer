@@ -90,9 +90,12 @@ define('KALSHI_USE_AUTH', env('KALSHI_USE_AUTH', '1') === '1');
 define('KALSHI_UFC_SERIES', env('KALSHI_UFC_SERIES', 'KXUFCFIGHT'));
 define('KALSHI_TIMEOUT', (int) env('KALSHI_TIMEOUT', '20'));
 
-// NewsAPI
-define('NEWSAPI_KEY', env_any(['NEWSAPI_KEY', 'NEWS_API_KEY']));
-define('NEWSAPI_BASE_URL', 'https://newsapi.org/v2');
+// TheNewsAPI (https://www.thenewsapi.com)
+define('NEWS_API_TOKEN', env_any(['THENEWSAPI_TOKEN', 'THENEWSAPI_KEY', 'THE_NEWS_API_KEY', 'NEWS_API_TOKEN']));
+define('NEWS_API_BASE_URL', rtrim(env('THENEWSAPI_BASE_URL', 'https://api.thenewsapi.com/v1'), '/'));
+define('NEWS_PAGE_SIZE', max(1, (int) env('NEWS_PAGE_SIZE', '3')));          // articles per request (free plan max is 3)
+define('NEWS_MAX_PAGES', max(1, (int) env('NEWS_MAX_PAGES', '3')));          // page 1, then 2, then 3 if still unclear
+define('NEWS_CONFIDENT_SCORE', max(1, (int) env('NEWS_CONFIDENT_SCORE', '8')));  // keyword score that counts as "enough"
 
 // Scanner / analysis rules
 define('DEFAULT_SPORT', 'UFC');

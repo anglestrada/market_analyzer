@@ -32,7 +32,7 @@ $newsCell = function (?string $status) use ($newsLabel): string {
 $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c) ? 0 : 1) . '¢';
 ?>
 <?php if ($vm['preview']): ?>
-    <div class="preview-banner" role="note"><b>Preview data.</b> Every market, price and article on this page is sample data generated for a design preview. It is not from Kalshi or NewsAPI.</div>
+    <div class="preview-banner" role="note"><b>Preview data.</b> Every market, price and article on this page is sample data generated for a design preview. It is not from Kalshi or TheNewsAPI.</div>
 <?php endif; ?>
 
 <header class="page-head">
