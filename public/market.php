@@ -135,9 +135,9 @@ $pct  = ($latest && $latest['yes_price'] !== null) ? (int) round((float) $latest
 $self = $_SERVER['REQUEST_URI'] ?? url('/market.php', ['id' => $id]);
 $name = $market['yes_subtitle'] ?: $market['market_title'];
 
-page_header($name, $user);
+page_header($name, $user, ['nav' => $market['status'] === 'open' ? 'overview' : 'history']);
 ?>
-<nav class="crumbs"><a href="<?= e(url('/index.php')) ?>">Dashboard</a><span>›</span><?= e($market['event_title']) ?></nav>
+<nav class="crumbs"><a href="<?= e(url('/index.php', ['market' => $id])) ?>">Overview</a><span>›</span><?= e($market['event_title']) ?></nav>
 
 <div class="page-head">
     <div>

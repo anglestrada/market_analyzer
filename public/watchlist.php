@@ -100,7 +100,7 @@ page_header('Watchlist', $user);
 
 <?php if (!$items): ?>
     <div class="empty card"><?= icon('star') ?>
-        <p>You aren't watching any markets yet. Click the ☆ next to any market on the <a href="<?= e(url('/index.php')) ?>">Dashboard</a>.</p>
+        <p>You aren't watching any markets yet. Open a market on the <a href="<?= e(url('/index.php')) ?>">Overview</a> and click <b>Watch</b>.</p>
     </div>
 <?php else: ?>
 

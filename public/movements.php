@@ -27,14 +27,30 @@ $preset = fn(string $label, string $mod) => '<a class="pill" href="' . e(url('/m
     'from' => to_local_input($now->modify($mod)), 'to' => to_local_input($now), 'side' => $side, 'status' => $status,
 ])) . '">' . e($label) . '</a>';
 
-page_header('Movements', $user);
+$closed = db()->prepare(
+    "SELECT m.id, m.market_title, m.yes_subtitle, m.status, m.close_time, m.settlement_time, e.event_title,
+            s.yes_price, s.no_price,
+            (SELECT COUNT(*) FROM market_movements mm WHERE mm.market_id = m.id) AS drops
+       FROM markets m
+       JOIN events e ON e.id = m.event_id
+  LEFT JOIN LATERAL (SELECT yes_price, no_price FROM market_snapshots
+                      WHERE market_id = m.id ORDER BY captured_at DESC LIMIT 1) s ON TRUE
+      WHERE e.sport = :sport AND m.status <> 'open'
+   ORDER BY COALESCE(m.settlement_time, m.close_time, m.updated_at) DESC
+      LIMIT 100"
+);
+$closed->execute([':sport' => DEFAULT_SPORT]);
+$closed = $closed->fetchAll();
+
+page_header('Market history', $user);
 ?>
-<div class="page-head">
+<header class="page-head">
     <div>
-        <h1>Movements</h1>
-        <p class="muted">Every time a YES or NO price dropped by at least <?= (int) MOVEMENT_THRESHOLD_PP ?> points between two consecutive scans.</p>
+        <p class="eyebrow">UFC / Market history</p>
+        <h1>Market history</h1>
+        <p class="page-sub">Every YES or NO drop of ≥ <?= (int) MOVEMENT_THRESHOLD_PP ?> pp between two consecutive scans, plus closed and settled markets.</p>
     </div>
-</div>
+</header>
 
 <form method="get" class="card filters">
     <div class="range"><?= $preset('24h', '-24 hours') ?><?= $preset('7d', '-7 days') ?><?= $preset('30d', '-30 days') ?><?= $preset('90d', '-90 days') ?></div>
@@ -102,5 +118,37 @@ page_header('Movements', $user);
         <span class="muted small"><?= count($rows) ?><?= count($rows) === 500 ? ' (newest 500)' : '' ?> · click a column to sort</span>
     </div>
     <?php render_movements_table($rows); ?>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h2>Closed &amp; settled markets</h2>
+        <span class="panel-note">Kept permanently · final saved snapshot</span>
+    </div>
+    <?php if (!$closed): ?>
+        <div class="empty-inline"><?= icon('markets') ?><div><b>No closed markets yet.</b>
+            <p>When a market closes, the scanner saves a final snapshot and it moves here.</p></div></div>
+    <?php else: ?>
+    <div class="table-wrap">
+        <table class="table data-table sortable">
+            <thead><tr><th>Market</th><th>Status</th><th class="num">Final YES</th><th class="num">Final NO</th><th class="num">Drops</th><th class="num">Closed</th></tr></thead>
+            <tbody>
+            <?php foreach ($closed as $c): $closedAt = $c['settlement_time'] ?: $c['close_time']; ?>
+                <tr>
+                    <td data-value="<?= e(strtolower((string) ($c['yes_subtitle'] ?: $c['market_title']))) ?>">
+                        <a href="<?= e(url('/market.php', ['id' => $c['id']])) ?>"><?= e($c['yes_subtitle'] ?: $c['market_title']) ?></a>
+                        <span class="cell-sub"><?= e($c['event_title']) ?></span>
+                    </td>
+                    <td><?= badge($c['status']) ?></td>
+                    <td class="num" data-value="<?= (float) $c['yes_price'] ?>"><?= fmt_price($c['yes_price']) ?></td>
+                    <td class="num" data-value="<?= (float) $c['no_price'] ?>"><?= fmt_price($c['no_price']) ?></td>
+                    <td class="num" data-value="<?= (int) $c['drops'] ?>"><?= (int) $c['drops'] ?></td>
+                    <td class="num" data-value="<?= $closedAt ? strtotime($closedAt) : 0 ?>"><?= e(fmt_time($closedAt, 'M j, Y')) ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php endif; ?>
 </section>
 <?php page_footer();

@@ -66,9 +66,11 @@ function fmt_pp(?float $pp): string
     if ($pp === null) {
         return '<span class="muted">—</span>';
     }
-    $cls   = $pp > 0.05 ? 'up' : ($pp < -0.05 ? 'down' : 'flat');
-    $arrow = $cls === 'up' ? '▲' : ($cls === 'down' ? '▼' : '•');
-    return '<span class="delta ' . $cls . '">' . $arrow . ' ' . number_format(abs($pp), 1) . '</span>';
+    $cls  = $pp > 0.05 ? 'up' : ($pp < -0.05 ? 'down' : 'flat');
+    $sign = $cls === 'up' ? '+' : ($cls === 'down' ? '−' : '±');
+    $word = $cls === 'up' ? 'up' : ($cls === 'down' ? 'down' : 'unchanged');
+    return '<span class="delta ' . $cls . '" title="' . $word . ' ' . number_format(abs($pp), 1) . ' percentage points">'
+        . $sign . number_format(abs($pp), 1) . ' pp</span>';
 }
 
 function fmt_time(?string $ts, string $format = 'M j, Y g:i A'): string
@@ -190,81 +192,126 @@ function prob_bar(mixed $yes): string
     return '<div class="prob" title="' . e(number_format($pct, 1)) . '% implied"><span style="width:' . round($pct, 1) . '%"></span></div>';
 }
 
-function kpi(string $label, string $valueHtml, string $subHtml = '', string $tone = 'accent', string $icon = 'markets'): string
+/** Compact summary cell used in the summary rows on every page. */
+function kpi(string $label, string $valueHtml, string $subHtml = '', string $tone = '', string $icon = ''): string
 {
-    return '<div class="kpi kpi-' . e($tone) . '">'
-        . '<div class="kpi-icon">' . icon($icon) . '</div>'
-        . '<div><span class="kpi-label">' . e($label) . '</span>'
-        . '<b class="kpi-value">' . $valueHtml . '</b>'
-        . '<span class="kpi-sub">' . $subHtml . '</span></div></div>';
+    return '<div class="stat' . ($tone ? ' stat-' . e($tone) : '') . '">'
+        . '<span class="stat-label">' . e($label) . '</span>'
+        . '<b class="stat-value">' . $valueHtml . '</b>'
+        . ($subHtml !== '' ? '<span class="stat-sub">' . $subHtml . '</span>' : '')
+        . '</div>';
 }
 
 /* ---------- layout ---------- */
 
+/**
+ * Opens the app shell: sidebar navigation + content column.
+ * $opts: 'nav' => overview|watchlist|history|scans|keywords|users (defaults from the script name),
+ *        'autorefresh' => seconds, 'wide' => bool
+ */
 function page_header(string $title, ?array $user = null, array $opts = []): void
 {
     $user ??= current_user();
     $flash = flash();
     $self  = $_SERVER['SCRIPT_NAME'] ?? '';
-    $nav   = fn(string $path, string $label, string $ic) =>
-        '<a href="' . e(url($path)) . '"' . (str_ends_with($self, $path) ? ' class="active"' : '') . '>' . icon($ic) . '<span>' . e($label) . '</span></a>';
-    $scan  = $user ? latest_scan() : null;
-    $stale = $scan && strtotime($scan['started_at']) < time() - 15 * 60;
-    $scanTone = !$scan ? 'none' : ($stale ? 'stale' : $scan['status']);
+    $routes = [
+        'overview'  => ['/index.php', 'Overview', 'markets'],
+        'watchlist' => ['/watchlist.php', 'Watchlist', 'star'],
+        'history'   => ['/movements.php', 'Market history', 'movements'],
+        'scans'     => ['/admin/scans.php', 'Scans', 'scans'],
+        'keywords'  => ['/admin/keywords.php', 'Keywords', 'keywords'],
+        'users'     => ['/admin/users.php', 'Users', 'users'],
+    ];
+    $active = $opts['nav'] ?? null;
+    if ($active === null) {
+        foreach ($routes as $key => [$path]) {
+            if (str_ends_with($self, $path)) {
+                $active = $key;
+            }
+        }
+    }
+    $link = function (string $key) use ($routes, $active): string {
+        [$path, $label, $ic] = $routes[$key];
+        $on = $key === $active;
+        return '<a href="' . e(url($path)) . '"' . ($on ? ' class="active" aria-current="page"' : '') . '>'
+            . icon($ic) . '<span>' . e($label) . '</span></a>';
+    };
+
+    $scan     = $user ? last_successful_scan() : null;
+    $latest   = $user ? latest_scan() : null;
+    $failing  = $latest && in_array($latest['status'], ['failed', 'partial'], true);
+    $stale    = $scan && strtotime($scan['finished_at'] ?? $scan['started_at']) < time() - 15 * 60;
+    $scanTone = !$scan ? 'none' : ($failing ? 'warn' : ($stale ? 'stale' : 'ok'));
     ?>
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <title><?= e($title) ?> · Kalshi Market Analyzer</title>
-    <script>document.documentElement.dataset.theme = localStorage.getItem('kma-theme') || 'dark';</script>
     <link rel="stylesheet" href="<?= e(asset('/assets/app.css')) ?>">
 </head>
-<body<?= !empty($opts['autorefresh']) ? ' data-autorefresh="' . (int) $opts['autorefresh'] . '"' : '' ?>>
-<header class="topbar">
-    <a class="brand" href="<?= e(url('/index.php')) ?>">
-        <span class="brand-mark"><?= icon('logo') ?></span>
-        <span>Market Analyzer <small>UFC</small></span>
-    </a>
-    <?php if ($user): ?>
-    <nav>
-        <?= $nav('/index.php', 'Dashboard', 'markets') ?>
-        <?= $nav('/movements.php', 'Movements', 'movements') ?>
-        <?= $nav('/watchlist.php', 'Watchlist', 'star') ?>
-        <?php if ($user['role'] === 'admin'): ?>
-            <span class="nav-sep"></span>
-            <?= $nav('/admin/scans.php', 'Scans', 'scans') ?>
-            <?= $nav('/admin/keywords.php', 'Keywords', 'keywords') ?>
-            <?= $nav('/admin/users.php', 'Users', 'users') ?>
-        <?php endif; ?>
-    </nav>
-    <div class="top-right">
-        <span class="scan-pill scan-<?= e($scanTone) ?>" title="Latest scan">
-            <i></i><?= $scan ? 'Scanned ' . reltime($scan['started_at']) : 'No scans yet' ?>
-        </span>
-        <button type="button" class="icon-btn" data-theme-toggle title="Toggle light/dark"><?= icon('theme') ?></button>
-        <span class="who"><?= e($user['email']) ?></span>
-        <form method="post" action="<?= e(url('/logout.php')) ?>" class="inline">
-            <?= csrf_field() ?><button class="icon-btn" title="Log out"><?= icon('logout') ?></button>
-        </form>
-    </div>
-    <?php endif; ?>
-</header>
-<main>
+<body class="<?= $user ? 'has-shell' : 'no-shell' ?>"<?= !empty($opts['autorefresh']) ? ' data-autorefresh="' . (int) $opts['autorefresh'] . '"' : '' ?>>
+<?php if ($user): ?>
+<div class="shell">
+    <aside class="sidebar">
+        <a class="brand" href="<?= e(url('/index.php')) ?>">
+            <span class="brand-mark">M</span>
+            <span class="brand-text">Market Analyzer<small>UFC · Kalshi</small></span>
+        </a>
+        <nav class="side-nav" aria-label="Main">
+            <?= $link('overview') ?>
+            <?= $link('watchlist') ?>
+            <?= $link('history') ?>
+            <?php if ($user['role'] === 'admin'): ?>
+                <span class="side-label">Admin</span>
+                <?= $link('scans') ?>
+                <?= $link('keywords') ?>
+                <?= $link('users') ?>
+            <?php endif; ?>
+        </nav>
+        <div class="side-foot">
+            <div class="scan-status scan-<?= e($scanTone) ?>">
+                <i aria-hidden="true"></i>
+                <span>
+                    <?php if ($scan): ?>
+                        Last scan <?= reltime($scan['finished_at'] ?? $scan['started_at']) ?>
+                        <small><?= $failing ? 'Latest run ' . e($latest['status']) : 'Every 5 minutes' ?></small>
+                    <?php else: ?>
+                        No successful scan yet
+                    <?php endif; ?>
+                </span>
+            </div>
+            <div class="side-user">
+                <span title="<?= e($user['email']) ?>"><?= e($user['email']) ?></span>
+                <form method="post" action="<?= e(url('/logout.php')) ?>" class="inline">
+                    <?= csrf_field() ?><button class="icon-btn" title="Log out" aria-label="Log out"><?= icon('logout') ?></button>
+                </form>
+            </div>
+        </div>
+    </aside>
+    <div class="content">
+<?php endif; ?>
+<main class="main<?= !empty($opts['wide']) ? ' main-wide' : '' ?>">
 <?php if ($flash): ?>
-    <div class="flash flash-<?= e($flash['type']) ?>"><?= e($flash['msg']) ?></div>
+    <div class="flash flash-<?= e($flash['type']) ?>" role="status"><?= e($flash['msg']) ?></div>
 <?php endif;
 }
 
-function page_footer(): void
+function page_footer(?array $user = null): void
 {
+    $user ??= current_user();
     ?>
 </main>
-<footer>
-    Market data analysis only. This is not a prediction or trading recommendation.
-    News shown alongside a movement is a possible explanation, not a proven cause.
+<footer class="foot">
+    Market data analysis only — not a prediction or trading recommendation.
+    News shown next to a price drop is a possible explanation; causation is unverified.
 </footer>
+<?php if ($user): ?>
+    </div>
+</div>
+<?php endif; ?>
 <?= vendor_script('chart.umd.js', 'https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js') ?>
 <?= vendor_script('hammer.min.js', 'https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js') ?>
 <?= vendor_script('chartjs-plugin-zoom.min.js', 'https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js') ?>
