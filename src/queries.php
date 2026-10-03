@@ -8,7 +8,16 @@ declare(strict_types=1);
 
 function latest_scan(): ?array
 {
-    return db()->query('SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
+    static $row = false;
+    return $row !== false ? $row : ($row = db()->query('SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null);
+}
+
+function last_successful_scan(): ?array
+{
+    static $row = false;
+    return $row !== false ? $row : ($row = db()->query(
+        "SELECT * FROM scan_runs WHERE status = 'completed' ORDER BY id DESC LIMIT 1"
+    )->fetch() ?: null);
 }
 
 /**
@@ -116,7 +125,7 @@ function render_movements_table(array $rows, bool $showMarket = true): void
                     <span class="muted"><?= fmt_price($r['previous_price']) ?></span> → <b><?= fmt_price($r['current_price']) ?></b>
                 </td>
                 <td data-value="<?= $pts ?>">
-                    <div class="drop"><span style="width:<?= min(100, round($pts * 3)) ?>%"></span><b>−<?= e(number_format($pts, 1)) ?></b></div>
+                    <div class="drop" title="<?= e(strtoupper($side)) ?> fell <?= e(number_format($pts, 1)) ?> percentage points"><span style="width:<?= min(100, round($pts * 3)) ?>%"></span><b>−<?= e(number_format($pts, 1)) ?> pp</b></div>
                 </td>
                 <td class="explain">
                     <?php if ($r['explanation_status'] === 'article_found' && $url): ?>

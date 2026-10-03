@@ -16,14 +16,18 @@
     try { return JSON.parse(el.textContent); } catch { return null; }
   };
 
-  const C = { yes: '#22c55e', no: '#f43f5e', accent: '#818cf8', amber: '#f59e0b', sky: '#38bdf8', violet: '#a78bfa', slate: '#64748b' };
-  const STATUS = {
-    article_found: { label: 'Article found', color: '#22c55e' },
-    no_explanation_found: { label: 'No explanation', color: '#f59e0b' },
-    news_search_failed: { label: 'Search failed', color: '#f43f5e' },
-    pending: { label: 'Pending', color: '#38bdf8' },
+  // Dark grey + green palette (mirrors the CSS variables in app.css).
+  const C = {
+    yes: '#7ccba6', no: '#d9b382', accent: '#7ccba6', amber: '#e2b35d', sky: '#8fb4d6',
+    violet: '#b4a7d6', slate: '#6f7873', down: '#f07a7a', up: '#63d394',
   };
-  const PALETTE = ['#818cf8', '#22c55e', '#f59e0b', '#38bdf8', '#f43f5e', '#a78bfa', '#14b8a6', '#ec4899'];
+  const STATUS = {
+    article_found: { label: 'Article found', color: '#7ccba6' },
+    no_explanation_found: { label: 'No explanation found', color: '#6f7873' },
+    news_search_failed: { label: 'Search failed', color: '#e2b35d' },
+    pending: { label: 'Pending', color: '#8fb4d6' },
+  };
+  const PALETTE = ['#7ccba6', '#d9b382', '#8fb4d6', '#e2b35d', '#b4a7d6', '#f07a7a', '#63d394', '#c9ced0'];
 
   const rgba = (hex, a) => {
     const n = parseInt(hex.slice(1), 16);
@@ -43,7 +47,7 @@
   const num = (v) => (v == null ? '—' : Number(v).toLocaleString());
 
   /* ------------------------------------------------------------------
-   * Theme (dark / light) — also re-colours existing charts
+   * Chart.js defaults for the dark theme
    * ---------------------------------------------------------------- */
   function themeCharts() {
     if (!window.Chart) return;
@@ -65,13 +69,6 @@
     d.animation.duration = 650;
     Object.values(Chart.instances).forEach((c) => c.update('none'));
   }
-
-  $$('[data-theme-toggle]').forEach((btn) => btn.addEventListener('click', () => {
-    const next = root.dataset.theme === 'light' ? 'dark' : 'light';
-    root.dataset.theme = next;
-    localStorage.setItem('kma-theme', next);
-    themeCharts();
-  }));
 
   /* ------------------------------------------------------------------
    * Shared chart options
@@ -138,7 +135,7 @@
           datasets: [
             { label: d.yesLabel || 'YES', data: s.map((p) => ({ x: p.t, y: p.yes })), borderColor: C.yes, backgroundColor: gradient(C.yes, 0.28), fill: 'origin', tension: 0.25, spanGaps: true, order: 2 },
             { label: d.noLabel || 'NO', data: s.map((p) => ({ x: p.t, y: p.no })), borderColor: C.no, backgroundColor: C.no, borderDash: [5, 4], borderWidth: 1.5, tension: 0.25, spanGaps: true, order: 3 },
-            { type: 'scatter', label: 'Movement', data: moves, backgroundColor: C.amber, borderColor: '#78350f', borderWidth: 1, pointStyle: 'triangle', rotation: 180, pointRadius: 8, pointHoverRadius: 10, order: 0 },
+            { type: 'scatter', label: 'Movement', data: moves, backgroundColor: C.down, borderColor: '#7a2e2e', borderWidth: 1, pointStyle: 'triangle', rotation: 180, pointRadius: 8, pointHoverRadius: 10, order: 0 },
             { type: 'bar', label: 'Volume', data: vol, yAxisID: 'vol', backgroundColor: rgba(C.sky, 0.35), borderRadius: 2, barPercentage: 1, categoryPercentage: 1, order: 4 },
           ],
         },
@@ -173,7 +170,7 @@
         type: 'line',
         data: {
           datasets: [
-            { label: 'YES ask', data: s.map((p) => ({ x: p.t, y: p.ask })), borderColor: rgba(C.no, 0.85), borderWidth: 1.5, backgroundColor: rgba(C.accent, 0.16), fill: '+1', stepped: true, spanGaps: true },
+            { label: 'YES ask', data: s.map((p) => ({ x: p.t, y: p.ask })), borderColor: rgba(C.down, 0.8), borderWidth: 1.5, backgroundColor: rgba(C.accent, 0.12), fill: '+1', stepped: true, spanGaps: true },
             { label: 'YES bid', data: s.map((p) => ({ x: p.t, y: p.bid })), borderColor: rgba(C.yes, 0.85), borderWidth: 1.5, fill: false, stepped: true, spanGaps: true },
             { label: 'Last trade', data: s.map((p) => ({ x: p.t, y: p.last })), borderColor: C.amber, borderWidth: 1.5, borderDash: [2, 3], fill: false, stepped: true, spanGaps: true },
           ],
@@ -251,7 +248,7 @@
     histogram(canvas, d) {
       return new Chart(canvas, {
         type: 'bar',
-        data: { labels: d.labels, datasets: [{ label: 'Movements', data: d.values, backgroundColor: d.values.map((_, i) => rgba(C.amber, 0.45 + i * 0.1)), borderRadius: 6 }] },
+        data: { labels: d.labels, datasets: [{ label: 'Movements', data: d.values, backgroundColor: d.values.map((_, i) => rgba(C.down, 0.4 + i * 0.1)), borderRadius: 6 }] },
         options: {
           responsive: true, maintainAspectRatio: false,
           scales: { x: { grid: { display: false } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
@@ -314,7 +311,7 @@
     /** Admin: markets found per scan, movements, duration, status-coloured points. */
     scanHealth(canvas, d) {
       if (!d.length) return false;
-      const sc = { completed: C.yes, partial: C.amber, failed: C.no, running: C.sky };
+      const sc = { completed: C.yes, partial: C.amber, failed: C.down, running: C.sky };
       return new Chart(canvas, {
         type: 'line',
         data: {
@@ -499,11 +496,342 @@
     }, secs * 1000);
   }
 
+  /* ------------------------------------------------------------------
+   * Overview: market watch list → selected market chart → news context.
+   * Clicking a market (list or "Latest drops" row) loads it from
+   * /api/market.php without a page reload.
+   * ---------------------------------------------------------------- */
+  function initOverview() {
+    const box = document.getElementById('overview');
+    if (!box) return;
+    const el = (name) => box.querySelector(`[data-el="${name}"]`);
+    const tz = box.dataset.tz || undefined;
+    const threshold = box.dataset.threshold || '5';
+    const fmtWhen = new Intl.DateTimeFormat(undefined, { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const when = (iso) => (iso ? fmtWhen.format(new Date(iso)) : '—');
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const price = (v) => (v == null ? '—' : `${Number.isInteger(+v) ? +v : (+v).toFixed(1)}¢`);
+    const pp = (v) => {
+      if (v == null) return '<span class="flat">—</span>';
+      const cls = v > 0.05 ? 'up' : v < -0.05 ? 'down' : 'flat';
+      const sign = cls === 'up' ? '+' : cls === 'down' ? '−' : '±';
+      return `<span class="delta ${cls}">${sign}${Math.abs(v).toFixed(1)} pp</span>`;
+    };
+    const STAR = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>';
+
+    const state = {
+      id: null, data: null, chart: null, req: 0,
+      range: box.dataset.range || '24h',
+      side: ['yes', 'no', 'both'].includes(localStorage.getItem('kma-side')) ? localStorage.getItem('kma-side') : 'yes',
+    };
+    const chartArea = box.querySelector('.chart-area');
+    const chartState = el('chart-state');
+
+    /* ----- states ----- */
+    function setChartState(kind, html) {
+      chartState.className = `chart-state${kind ? ` is-${kind}` : ''}`;
+      chartState.innerHTML = html || '';
+      chartState.hidden = !kind;
+    }
+    function setLoading(on, marketChanged) {
+      chartArea.classList.toggle('is-loading', on);
+      box.setAttribute('aria-busy', on ? 'true' : 'false');
+      if (on) {
+        setChartState('loading', '<span class="spinner" aria-hidden="true"></span><span>Loading price history…</span>');
+        if (marketChanged) el('news-body').innerHTML = '<span class="skeleton w-80"></span><span class="skeleton w-60"></span><span class="skeleton w-40"></span>';
+      } else if (chartState.classList.contains('is-loading')) {
+        setChartState(null);
+      }
+    }
+    function showError(message, retry, marketChanged) {
+      chartArea.classList.remove('is-loading');
+      setChartState('error', `<b>Couldn't load this market.</b><span>${esc(message)}</span><button type="button" class="ghost" data-retry>Try again</button>`);
+      chartState.querySelector('[data-retry]').addEventListener('click', retry);
+      if (marketChanged || !state.data) {
+        el('news-body').innerHTML = '<div class="news-status tone-error"><b>News context unavailable</b><p>It will appear once the market loads.</p></div>';
+      }
+    }
+
+    /* ----- chart ----- */
+    function ensureChart() {
+      if (state.chart) return state.chart;
+      if (!window.Chart) return null;
+      themeCharts();
+      const line = (key, color) => ({
+        key, label: key.toUpperCase(), data: [], borderColor: color, borderWidth: 2, tension: 0.2, spanGaps: true,
+        backgroundColor: gradient(color, 0.2), fill: 'start',
+        pointRadius: (ctx) => (ctx.dataIndex === ctx.dataset.data.length - 1 ? 3.5 : 0),
+        pointBackgroundColor: color, pointHoverRadius: 4,
+      });
+      const marks = (key, label) => ({
+        key, type: 'scatter', label, data: [], backgroundColor: C.down, borderColor: '#5c2424', borderWidth: 1,
+        pointStyle: 'triangle', rotation: 180, pointRadius: 6, pointHoverRadius: 8,
+      });
+      state.chart = new Chart(document.getElementById('overview-chart'), {
+        type: 'line',
+        data: { datasets: [line('yes', C.yes), line('no', C.no), marks('yesDrops', 'YES drop'), marks('noDrops', 'NO drop')] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          scales: {
+            x: { type: 'time', grid: { display: false }, ticks: { maxRotation: 0, autoSkipPadding: 32, color: css('--muted') } },
+            y: { ticks: { callback: (v) => `${v}¢`, maxTicksLimit: 5, color: css('--muted') }, grid: { color: css('--grid') }, border: { display: false } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (items) => (items.length ? when(new Date(items[0].parsed.x).toISOString()) : ''),
+                label: (i) => (i.dataset.type === 'scatter' ? ` ${i.raw.label}` : ` ${i.dataset.label}: ${price(i.parsed.y)}`),
+              },
+            },
+          },
+        },
+      });
+      return state.chart;
+    }
+
+    function drawChart(d) {
+      const series = d.series || [];
+      if (!window.Chart) {
+        setChartState('error', '<b>Charts couldn\'t load.</b><span>Chart.js is missing. Run <code>npm install</code> or check your internet connection.</span>');
+        return;
+      }
+      if (!series.length) {
+        if (state.chart) state.chart.data.datasets.forEach((ds) => { ds.data = []; });
+        state.chart?.update('none');
+        setChartState('empty', `<b>No price history for ${esc(d.range.label)}.</b><span>The scanner saves one snapshot every 5 minutes.</span>${d.range.key !== 'all' ? '<button type="button" class="ghost" data-show-all>Show all time</button>' : ''}`);
+        chartState.querySelector('[data-show-all]')?.addEventListener('click', () => setRange('all'));
+        return;
+      }
+      setChartState(null);
+      const chart = ensureChart();
+      const show = { yes: state.side !== 'no', no: state.side !== 'yes' };
+      const both = state.side === 'both';
+      const byKey = Object.fromEntries(chart.data.datasets.map((ds) => [ds.key, ds]));
+      byKey.yes.data = series.map((p) => ({ x: p.t, y: p.yes }));
+      byKey.no.data = series.map((p) => ({ x: p.t, y: p.no }));
+      byKey.yes.label = `YES${d.market.yes_label ? ` · ${d.market.yes_label}` : ''}`;
+      byKey.no.label = `NO${d.market.no_label ? ` · ${d.market.no_label}` : ''}`;
+      const drops = (side) => (d.moves || []).filter((m) => m.side === side)
+        .map((m) => ({ x: m.x, y: m.y, label: `${side.toUpperCase()} dropped ${m.pts.toFixed(1)} pp` }));
+      byKey.yesDrops.data = drops('yes');
+      byKey.noDrops.data = drops('no');
+      byKey.yes.hidden = !show.yes; byKey.yesDrops.hidden = !show.yes;
+      byKey.no.hidden = !show.no; byKey.noDrops.hidden = !show.no;
+      byKey.yes.fill = both ? false : 'start';
+      byKey.no.fill = both ? false : 'start';
+
+      // Fit the y-axis to what is visible, padded and rounded to 5¢ so small moves stay readable.
+      const vals = [];
+      series.forEach((p) => { if (show.yes && p.yes != null) vals.push(p.yes); if (show.no && p.no != null) vals.push(p.no); });
+      const lo = Math.min(...vals); const hi = Math.max(...vals);
+      chart.options.scales.y.min = Math.max(0, Math.floor((lo - 4) / 5) * 5);
+      chart.options.scales.y.max = Math.min(100, Math.ceil((hi + 4) / 5) * 5);
+      chart.update();
+    }
+
+    /* ----- news context ----- */
+    function renderNews(a, market) {
+      const body = el('news-body');
+      const drop = a.drop
+        ? `<span class="side side-${a.drop.side}">${a.drop.side.toUpperCase()}</span><span class="delta down">−${a.drop.pts.toFixed(1)} pp</span>`
+        : '';
+      const dropText = a.drop ? `${a.drop.side.toUpperCase()} −${a.drop.pts.toFixed(1)} pp drop on ${when(a.drop.at)}` : '';
+      const status = (tone, title, text) => `<div class="news-status${tone ? ` tone-${tone}` : ''}"><b>${title}</b><p>${text}</p></div>`;
+
+      if (a.status === 'article_found' && a.article) {
+        const art = a.article;
+        const title = art.url
+          ? `<a class="news-title" href="${esc(art.url)}" target="_blank" rel="noopener noreferrer">${esc(art.title)}</a>`
+          : `<span class="news-title">${esc(art.title)}</span>`;
+        const kws = (a.keywords || []).map((k) => `<span class="kw">${esc(k)}</span>`).join('') || '—';
+        body.innerHTML = `
+          <span class="news-kicker">Possible explanation · score ${a.score}</span>
+          ${title}
+          <span class="news-meta">${esc(art.source || 'Unknown source')} · Published ${esc(when(art.published_at))}</span>
+          ${art.description ? `<p class="news-desc">${esc(art.description)}</p>` : ''}
+          <dl class="facts">
+            <dt>Drop</dt><dd>${drop}</dd>
+            <dt>Detected</dt><dd>${esc(when(a.drop?.at))}</dd>
+            <dt>Matched keywords</dt><dd><span class="kw-list">${kws}</span></dd>
+            <dt>Relevance score</dt><dd>${a.score} point${a.score === 1 ? '' : 's'}</dd>
+            ${a.drops > 1 ? `<dt>Drops recorded</dt><dd>${a.drops}</dd>` : ''}
+          </dl>
+          <p class="news-note">Highest-scoring article from the 48 hours before a drop. Possible explanation; causation is unverified.</p>`;
+        return;
+      }
+      if (a.status === 'no_explanation_found') {
+        body.innerHTML = status('', 'No explanation found',
+          `No article matched the keyword rules in the 48 hours before the ${esc(dropText)}.`)
+          + '<p class="news-note">This doesn\'t rule out a cause. The keyword rules may not cover it.</p>';
+      } else if (a.status === 'news_search_failed') {
+        body.innerHTML = status('warn', 'News search failed',
+          `The search for the ${esc(dropText)} didn't complete. It is retried automatically on the next scan.`);
+      } else if (a.status === 'pending') {
+        body.innerHTML = status('', 'Analysis pending',
+          `A ${esc(dropText)} was detected. The news search runs at the end of the scan.`);
+      } else {
+        body.innerHTML = status('', 'No significant drop yet',
+          `News is searched only after YES or NO falls by at least ${esc(threshold)} pp between two scans. ${market.status === 'open' ? 'This market hasn\'t had one yet.' : 'This market never had one.'}`);
+      }
+    }
+
+    /* ----- header, price, footer ----- */
+    function render() {
+      const d = state.data;
+      if (!d) return;
+      const m = d.market;
+      const main = state.side === 'no' ? 'no' : 'yes';
+      const statusText = { open: 'Open market', closed: 'Closed market', settled: 'Settled market', cancelled: 'Cancelled market' }[m.status] || 'Market';
+
+      el('eyebrow').textContent = `UFC · ${statusText}`;
+      el('name').textContent = m.name;
+      el('event').textContent = [m.event, m.event_start ? `Fight ${when(m.event_start)}` : null].filter(Boolean).join(' · ');
+
+      el('actions').innerHTML = `
+        <form method="post" action="${esc(box.dataset.watchAction)}" class="inline">
+          <input type="hidden" name="csrf_token" value="${esc(box.dataset.csrf)}">
+          <input type="hidden" name="action" value="${d.watched ? 'remove' : 'add'}">
+          <input type="hidden" name="market_id" value="${m.id}">
+          <input type="hidden" name="return" value="${esc(location.pathname + location.search)}">
+          <button class="btn-watch${d.watched ? ' on' : ''}" title="${d.watched ? 'Remove from' : 'Add to'} watchlist">${STAR}<span>${d.watched ? 'Watching' : 'Watch'}</span></button>
+        </form>
+        <a class="pill" href="${esc(m.url)}">Details</a>`;
+
+      const label = main === 'yes' ? m.yes_label : m.no_label;
+      el('price').textContent = price(d.latest ? d.latest[main] : null);
+      el('price-side').textContent = `${main.toUpperCase()}${label ? ` · ${label}` : ''}`;
+      if (!d.latest) {
+        el('change').innerHTML = '<span class="flat">No snapshot saved yet</span>';
+      } else if (state.side === 'both') {
+        el('change').innerHTML = `YES ${pp(d.change.yes)} · NO ${pp(d.change.no)} since previous scan`;
+      } else {
+        el('change').innerHTML = d.change[main] == null
+          ? '<span class="flat">Only one scan so far, so there is no change yet</span>'
+          : `${pp(d.change[main])} since previous scan`;
+      }
+
+      const pts = (d.series || []).map((p) => p[main]).filter((v) => v != null);
+      el('foot-left').textContent = `Price history · ${d.range.label} · price in cents${state.side === 'both' ? ' · green = YES, sand = NO' : ''}`;
+      el('foot-right').innerHTML = pts.length
+        ? `${main.toUpperCase()} start ${price(pts[0])} · now ${price(pts[pts.length - 1])} · ${pp(pts[pts.length - 1] - pts[0])}`
+        : '';
+
+      drawChart(d);
+      renderNews(d.analysis || { status: 'none' }, m);
+    }
+
+    /* ----- loading ----- */
+    async function load(id, { view = false, marketChanged = true, quiet = false } = {}) {
+      const req = ++state.req;
+      const timer = quiet ? null : setTimeout(() => setLoading(true, marketChanged), 150);
+      try {
+        const url = new URL(box.dataset.api, location.href);
+        url.searchParams.set('id', id);
+        url.searchParams.set('range', state.range);
+        if (view) url.searchParams.set('view', '1');
+        const res = await fetch(url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+        let body = null;
+        try { body = await res.json(); } catch { /* not JSON, handled below */ }
+        if (res.status === 401 && body?.login) { location.href = body.login; return; }
+        if (!res.ok || !body || body.error) throw new Error(body?.error || `The server responded with ${res.status}.`);
+        if (req !== state.req) return;   // a newer click won
+        state.data = body;
+        state.id = id;
+        clearTimeout(timer);
+        setLoading(false);
+        render();
+      } catch (err) {
+        clearTimeout(timer);
+        if (req === state.req && !quiet) showError(err.message || 'Network error.', () => load(id, { view, marketChanged }), marketChanged);
+      }
+    }
+
+    function syncUrl() {
+      const u = new URL(location.href);
+      u.searchParams.set('market', state.id);
+      u.searchParams.set('range', state.range);
+      history.replaceState(null, '', u);
+    }
+
+    function markSelected(id) {
+      $$('.mw-item, .drops-table tr[data-market-id]').forEach((n) => {
+        const on = +n.dataset.marketId === id;
+        n.classList.toggle('is-selected', on);
+        if (n.classList.contains('mw-item')) { if (on) n.setAttribute('aria-current', 'true'); else n.removeAttribute('aria-current'); }
+      });
+    }
+
+    function select(id, { scroll = false } = {}) {
+      if (!id) return;
+      state.id = id;
+      markSelected(id);
+      syncUrl();
+      load(id, { view: true, marketChanged: true });
+      if (scroll && box.getBoundingClientRect().top < 0) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function setRange(key) {
+      state.range = key;
+      $$('[data-range]', el('ranges')).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === key)));
+      syncUrl();
+      load(state.id, { marketChanged: false });
+    }
+
+    /* ----- wiring ----- */
+    $$('.mw-item', box).forEach((a) => a.addEventListener('click', (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;   // let "open in new tab" work
+      e.preventDefault();
+      select(+a.dataset.marketId);
+    }));
+    $$('.drops-table tbody tr[data-market-id]').forEach((tr) => tr.addEventListener('click', (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      select(+tr.dataset.marketId, { scroll: true });
+    }));
+    $$('[data-side]', el('sides')).forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.side === state.side));
+      b.addEventListener('click', () => {
+        state.side = b.dataset.side;
+        localStorage.setItem('kma-side', state.side);
+        $$('[data-side]', el('sides')).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        render();
+      });
+    });
+    $$('[data-range]', el('ranges')).forEach((b) => b.addEventListener('click', () => setRange(b.dataset.range)));
+
+    // Hide event group labels whose markets are all filtered out.
+    const filter = box.querySelector('.mw-search input');
+    filter?.addEventListener('input', () => {
+      $$('.mw-group', box).forEach((g) => {
+        let n = g.nextElementSibling; let any = false;
+        while (n && !n.classList.contains('mw-group')) { if (n.classList.contains('mw-item') && !n.hidden) any = true; n = n.nextElementSibling; }
+        g.hidden = !any;
+      });
+    });
+
+    // Initial market comes embedded in the page, so there is no extra request on load.
+    const initial = readJSON('overview-initial');
+    if (initial && initial.market) {
+      state.data = initial;
+      state.id = initial.market.id;
+      render();
+    } else {
+      setChartState('empty', '<b>No market selected.</b><span>Pick a market from the list.</span>');
+      el('news-body').innerHTML = '<p class="news-note">News context appears here for the selected market.</p>';
+    }
+
+    // Quietly refresh the selected market every 5 minutes (matches the scan interval).
+    setInterval(() => { if (!document.hidden && state.id) load(state.id, { marketChanged: false, quiet: true }); }, 300000);
+  }
+
   initCharts();
   updateRelTimes();
   setInterval(updateRelTimes, 30000);
   initSorting();
   initFilters();
+  initOverview();
   countUp();
   initFlash();
   initBusyForms();
