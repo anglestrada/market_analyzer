@@ -1,6 +1,6 @@
 <?php
 /**
- * Overview page body. Expects $vm from public/index.php:
+ * Overview page body. Expects $vm from public/public/index.php:
  *   markets, summary, drops, selected, initial, range, scan, latest, is_admin, preview
  * Pure presentation: no database calls in here.
  */
@@ -96,7 +96,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                     <div class="mw-group"><?= e($m['event']) ?></div>
                 <?php endif; ?>
                 <a class="mw-item<?= $m['id'] === $vm['selected'] ? ' is-selected' : '' ?>" role="listitem"
-                   href="<?= e(url('/index.php', ['market' => $m['id']])) ?>" data-market-id="<?= $m['id'] ?>"
+                   href="<?= e(url('/public/index.php', ['market' => $m['id']])) ?>" data-market-id="<?= $m['id'] ?>"
                    data-search="<?= e(strtolower($m['name'] . ' ' . $m['title'] . ' ' . $m['event'])) ?>"
                    <?= $m['id'] === $vm['selected'] ? 'aria-current="true"' : '' ?>>
                     <span class="mw-name"><?= e($m['name']) ?><?php if ($m['watched']): ?> <span title="On your watchlist"><?= icon('star', 'mw-star') ?></span><?php endif; ?></span>
@@ -186,7 +186,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
             <?php foreach ($drops as $d): $mid = (int) $d['market_id']; ?>
                 <tr data-market-id="<?= $mid ?>" class="<?= $mid === $vm['selected'] ? 'is-selected' : '' ?>">
                     <td>
-                        <a href="<?= e(url('/index.php', ['market' => $mid])) ?>" data-market-id="<?= $mid ?>"><?= e($d['yes_subtitle'] ?: $d['market_title']) ?></a>
+                        <a href="<?= e(url('/public/index.php', ['market' => $mid])) ?>" data-market-id="<?= $mid ?>"><?= e($d['yes_subtitle'] ?: $d['market_title']) ?></a>
                         <span class="cell-sub"><?= e($d['event_title']) ?></span>
                     </td>
                     <td class="num"><?= $cents($d['yes_after']) ?></td>

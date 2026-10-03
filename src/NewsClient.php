@@ -38,10 +38,14 @@ final class NewsClient
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_USERAGENT      => 'KalshiMarketAnalyzer/1.0',
         ]);
+       if ($ca = env('CA_BUNDLE')) {
+            curl_setopt($ch, CURLOPT_CAINFO, $ca);
+        } elseif (defined('CURLSSLOPT_NATIVE_CA')) {
+            curl_setopt($ch, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+        }
         $body   = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $err    = curl_error($ch);
-        curl_close($ch);
 
         if ($body === false) {
             throw new NewsApiException("NewsAPI request failed: $err");

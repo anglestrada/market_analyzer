@@ -73,15 +73,20 @@ ini_set('max_execution_time', IS_CLI ? '0' : '300');   // admin "Run scan now" m
  * ---------------------------------------------------------------------- */
 
 // Kalshi — your .env names (K_KEY, etc.) are accepted as well as the long names.
-define('KALSHI_BASE_URL', rtrim(env('KALSHI_BASE_URL', 'https://external-api.kalshi.com/trade-api/v2'), '/'));
-define('KALSHI_KEY_ID', env_any(['KALSHI_KEY_ID', 'K_KEY']));
-$keyPath = env_any(['KALSHI_PRIVATE_KEY_PATH', 'K_KEY_PATH', 'K_PRIVATE_KEY_PATH', 'K_RSA_PATH'], 'kalshi.key');
+// Kalshi
+$kalshiBase = rtrim(env('KALSHI_BASE_URL', 'https://api.elections.kalshi.com/trade-api/v2'), '/');
+if (!str_ends_with($kalshiBase, '/trade-api/v2')) {
+    $kalshiBase .= '/trade-api/v2';
+}
+define('KALSHI_BASE_URL', $kalshiBase);
+define('KALSHI_ACCESS_KEY', env_any(['KALSHI_ACCESS_KEY']));
+$keyPath = env_any(['KALSHI_PRIVATE_KEY_PATH'], 'kalshi.key');
 if (!preg_match('#^(/|[A-Za-z]:[\\\\/])#', $keyPath)) {
     $keyPath = __DIR__ . '/' . preg_replace('#^\./#', '', $keyPath);   // relative paths are relative to this folder
 }
 define('KALSHI_PRIVATE_KEY_PATH', $keyPath);
-define('KALSHI_PRIVATE_KEY_PEM', env_any(['KALSHI_PRIVATE_KEY', 'K_RSA_KEY', 'K_PRIVATE_KEY']));  // optional inline PEM
-define('KALSHI_USE_AUTH', env('KALSHI_USE_AUTH', '1') === '1');     // market data is public; signing is optional
+define('KALSHI_PRIVATE_KEY_PEM', env_any(['KALSHI_PRIVATE_KEY', 'K_RSA_KEY', 'K_PRIVATE_KEY']));
+define('KALSHI_USE_AUTH', env('KALSHI_USE_AUTH', '1') === '1');
 define('KALSHI_UFC_SERIES', env('KALSHI_UFC_SERIES', 'KXUFCFIGHT'));
 define('KALSHI_TIMEOUT', (int) env('KALSHI_TIMEOUT', '20'));
 
@@ -156,7 +161,7 @@ $dbh = db();   // kept for any existing code that uses $dbh
 function kalshi_auth_available(): bool
 {
     return KALSHI_USE_AUTH
-        && KALSHI_KEY_ID !== null
+        && KALSHI_ACCESS_KEY !== null
         && (KALSHI_PRIVATE_KEY_PEM !== null || is_readable(KALSHI_PRIVATE_KEY_PATH));
 }
 
@@ -196,7 +201,7 @@ function kalshi_auth_headers(string $method, string $path): array
     $message   = $timestamp . strtoupper($method) . explode('?', $path, 2)[0];
 
     return [
-        'KALSHI-ACCESS-KEY: '       . KALSHI_KEY_ID,
+        'KALSHI-ACCESS-KEY: '       . KALSHI_ACCESS_KEY,
         'KALSHI-ACCESS-TIMESTAMP: ' . $timestamp,
         'KALSHI-ACCESS-SIGNATURE: ' . base64_encode(kalshi_private_key()->sign($message)),
     ];

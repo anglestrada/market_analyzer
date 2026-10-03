@@ -3,7 +3,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../config.php';
 
 if (current_user()) {
-    redirect('/index.php');
+    redirect('/public/index.php');
 }
 
 $error = null;
