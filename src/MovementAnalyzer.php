@@ -174,7 +174,7 @@ final class MovementAnalyzer
     private function activeKeywords(): array
     {
         return $this->keywords ??= $this->db
-            ->query('SELECT keyword, score FROM keywords WHERE is_active = TRUE ORDER BY score DESC')
+            ->query("SELECT keyword, score FROM keywords WHERE is_active = TRUE AND scope IN ('news', 'both') ORDER BY score DESC")
             ->fetchAll();
     }
 

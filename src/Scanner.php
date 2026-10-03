@@ -18,14 +18,16 @@ final class Scanner
         private KalshiClient $kalshi,
         private MovementAnalyzer $analyzer,
         ?callable $log = null,
+        private ?EvidenceCollector $evidence = null,
     ) {
         $this->log = $log;
     }
 
     public static function make(?callable $log = null): self
     {
-        $db = db();
-        return new self($db, new KalshiClient(), new MovementAnalyzer($db, new NewsClient()), $log);
+        $db     = db();
+        $kalshi = new KalshiClient();
+        return new self($db, $kalshi, new MovementAnalyzer($db, new NewsClient()), $log, EvidenceCollector::make($db, $kalshi));
     }
 
     /** @return array summary of the run */
@@ -124,10 +126,21 @@ final class Scanner
             } catch (Throwable $e) {
                 $errors[] = "News for movement #$movementId: " . $e->getMessage();
             }
+            // Live evidence (ESPN, X, Reddit, Kalshi trades). Problems here are logged, never fail the scan.
+            if ($this->evidence) {
+                try {
+                    $this->evidence->collect($movementId);
+                    $this->say("  evidence → {$this->evidence->lastSummary}");
+                } catch (Throwable $e) {
+                    $this->say("  evidence failed: " . $e->getMessage());
+                    error_log('[evidence] ' . $e);
+                }
+            }
         }
 
         // Retry earlier news failures (handoff: "retried on the next scheduled scan").
         $this->retryFailedNews($errors);
+        $this->evidence?->retryFailed(fn(string $m) => $this->say($m));
 
         // 12–13. Finish
         $status = !$errors ? 'completed' : (($updated > 0 || $found === 0) ? 'partial' : 'failed');

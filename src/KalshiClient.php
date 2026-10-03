@@ -125,6 +125,40 @@ final class KalshiClient
         return $resp['market'];
     }
 
+    /**
+     * Public trades (fills) on one market between two Unix times, oldest first.
+     *
+     * @return array<int, array{side:string, count:int, yes_price:?float, at:string}>
+     *         side = the outcome the taker bought ('yes' or 'no')
+     */
+    public function trades(string $ticker, int $minTs, int $maxTs, int $maxPages = 5): array
+    {
+        $out    = [];
+        $cursor = null;
+        $pages  = 0;
+        do {
+            $query = ['ticker' => $ticker, 'min_ts' => $minTs, 'max_ts' => $maxTs, 'limit' => 1000];
+            if ($cursor) {
+                $query['cursor'] = $cursor;
+            }
+            $resp = $this->get('/markets/trades', $query);
+            foreach ($resp['trades'] ?? [] as $t) {
+                // outcome_side is the current field; taker_side is the legacy one.
+                $side  = strtolower((string) ($t['taker_outcome_side'] ?? $t['outcome_side'] ?? $t['taker_side'] ?? ''));
+                $count = self::quantity($t, 'count');
+                if (!in_array($side, ['yes', 'no'], true) || !$count || empty($t['created_time'])) {
+                    continue;
+                }
+                $out[] = ['side' => $side, 'count' => $count, 'yes_price' => self::price($t, 'yes_price'), 'at' => (string) $t['created_time']];
+            }
+            $cursor = $resp['cursor'] ?? '';
+            $pages++;
+        } while ($cursor !== '' && $cursor !== null && $pages < $maxPages);
+
+        usort($out, fn($a, $b) => strtotime($a['at']) <=> strtotime($b['at']));
+        return $out;
+    }
+
     /* ------------------------------------------------------------------
      * Normalization: Kalshi → our columns
      * ---------------------------------------------------------------- */

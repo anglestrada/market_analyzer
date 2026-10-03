@@ -56,12 +56,19 @@ function fetch_movements(array $f = [], int $limit = 50): array
     $sql = 'SELECT mm.*, m.market_title, m.yes_subtitle, m.no_subtitle, m.status AS market_status,
                    e.event_title,
                    ma.explanation_status, ma.relevance_score, ma.matched_keywords,
-                   a.title AS article_title, a.url AS article_url, a.source_name, a.published_at AS article_published_at
+                   a.title AS article_title, a.url AS article_url, a.source_name, a.published_at AS article_published_at,
+                   ev.source AS ev_source, ev.headline AS ev_headline, ev.detail AS ev_detail, ev.url AS ev_url,
+                   ev.score AS ev_score, COALESCE(evn.n, 0) AS ev_found
               FROM market_movements mm
               JOIN markets m ON m.id = mm.market_id
               JOIN events  e ON e.id = m.event_id
          LEFT JOIN movement_analysis ma ON ma.movement_id = mm.id
          LEFT JOIN articles a ON a.id = ma.article_id
+         LEFT JOIN LATERAL (SELECT source, headline, detail, url, score FROM movement_evidence x
+                             WHERE x.movement_id = mm.id AND x.status = \'found\' AND x.stance = \'supports\' AND x.score >= 2
+                             ORDER BY x.score DESC LIMIT 1) ev ON TRUE
+         LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM movement_evidence x
+                             WHERE x.movement_id = mm.id AND x.status = \'found\' AND x.stance = \'supports\') evn ON TRUE
              WHERE ' . implode(' AND ', $where) . '
           ORDER BY mm.detected_at DESC
              LIMIT ' . max(1, min($limit, 1000));
@@ -135,6 +142,11 @@ function render_movements_table(array $rows, bool $showMarket = true): void
                             · score <b><?= (int) $r['relevance_score'] ?></b>
                         </div>
                         <?php if ($kw): ?><div class="kw-list"><?php foreach ($kw as $k): ?><span class="kw"><?= e($k) ?></span><?php endforeach; ?></div><?php endif; ?>
+                        <?php if ((int) $r['ev_found'] > 0): ?><div class="muted small">+ <?= (int) $r['ev_found'] ?> live source<?= (int) $r['ev_found'] === 1 ? '' : 's' ?> agree</div><?php endif; ?>
+                    <?php elseif ($r['ev_source']): $evUrl = safe_external_url($r['ev_url']); ?>
+                        <span class="src-chip src-<?= e($r['ev_source']) ?>"><?= e(SOURCE_LABELS[$r['ev_source']] ?? $r['ev_source']) ?></span>
+                        <?php if ($evUrl): ?><a href="<?= e($evUrl) ?>" target="_blank" rel="noopener noreferrer"><?= e($r['ev_headline']) ?></a><?php else: ?><?= e($r['ev_headline']) ?><?php endif; ?>
+                        <div class="muted small"><?= e($r['ev_detail']) ?> · score <b><?= (int) $r['ev_score'] ?></b><?= (int) $r['ev_found'] > 1 ? ' · ' . ((int) $r['ev_found'] - 1) . ' more source' . ((int) $r['ev_found'] > 2 ? 's' : '') : '' ?></div>
                     <?php else: ?>
                         <?= badge($r['explanation_status'] ?? 'pending') ?>
                     <?php endif; ?>
