@@ -31,24 +31,38 @@ $totals = db()->query(
             (SELECT COUNT(*) FROM articles) AS articles"
 )->fetch();
 
+$health = chart_scan_health(48);
+$okRate = $health ? 100 * count(array_filter($health, fn($r) => $r['status'] === 'completed')) / count($health) : null;
+
 page_header('Scans', $admin);
 ?>
 <div class="page-head">
     <h1>Scan runs</h1>
-    <form method="post">
+    <form method="post" data-busy="Scanning… this can take a minute">
         <?= csrf_field() ?><input type="hidden" name="action" value="run">
         <button>Run scan now</button>
     </form>
 </div>
 
-<div class="stats compact">
-    <div><span>Markets</span><b><?= fmt_int($totals['markets']) ?></b><small><?= fmt_int($totals['open_markets']) ?> open</small></div>
-    <div><span>Snapshots</span><b><?= fmt_int($totals['snapshots']) ?></b><small>kept forever</small></div>
-    <div><span>Movements</span><b><?= fmt_int($totals['movements']) ?></b><small>≥ <?= (int) MOVEMENT_THRESHOLD_PP ?> pts</small></div>
-    <div><span>Articles</span><b><?= fmt_int($totals['articles']) ?></b><small>relevant only</small></div>
-    <div><span>Kalshi auth</span><b><?= kalshi_auth_available() ? 'signed' : 'public' ?></b><small><?= e(KALSHI_UFC_SERIES) ?></small></div>
-    <div><span>NewsAPI</span><b><?= NEWSAPI_KEY ? 'configured' : 'missing key' ?></b><small><?= NEWS_LOOKBACK_HOURS ?>h lookback</small></div>
+<div class="kpis">
+    <?= kpi('Markets', count_num((int) $totals['markets']), fmt_int($totals['open_markets']) . ' open', 'accent', 'markets') ?>
+    <?= kpi('Snapshots', count_num((int) $totals['snapshots']), 'kept forever', 'sky', 'scans') ?>
+    <?= kpi('Movements', count_num((int) $totals['movements']), fmt_int($totals['articles']) . ' relevant articles', 'amber', 'movements') ?>
+    <?= kpi('Success · 48h', $health ? count_num($okRate, 0, '%') : '—', count($health) . ' scans', $okRate !== null && $okRate < 90 ? 'red' : 'green', 'scans') ?>
 </div>
+
+<div class="stat-chips">
+    <div><span>Kalshi requests</span><b><?= kalshi_auth_available() ? 'signed' : 'public' ?></b></div>
+    <div><span>Series</span><b><?= e(KALSHI_UFC_SERIES) ?></b></div>
+    <div><span>NewsAPI</span><b><?= NEWSAPI_KEY ? 'configured' : 'missing key' ?></b></div>
+    <div><span>News lookback</span><b><?= NEWS_LOOKBACK_HOURS ?>h</b></div>
+</div>
+
+<section class="card">
+    <div class="card-head"><h2>Scan health · last 48 hours</h2><span class="muted small">dots: <span class="up">completed</span> · <span class="amber-text">partial</span> · <span class="down">failed</span></span></div>
+    <div class="chart-box h-260"><canvas data-chart="scanHealth" data-source="d-health" data-empty="No scans in the last 48 hours."></canvas></div>
+    <?= json_script('d-health', $health) ?>
+</section>
 
 <section class="card">
     <table class="table">

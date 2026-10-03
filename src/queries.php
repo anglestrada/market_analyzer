@@ -78,38 +78,54 @@ function safe_external_url(?string $url): ?string
 function render_movements_table(array $rows, bool $showMarket = true): void
 {
     if (!$rows) {
-        echo '<p class="muted">No movements in this range.</p>';
+        echo '<div class="empty">' . icon('movements') . '<p>No movements in this range.</p></div>';
         return;
     }
     ?>
-    <table class="table">
+    <div class="table-wrap">
+    <table class="table sortable">
         <thead><tr>
             <th>Detected</th>
             <?php if ($showMarket): ?><th>Market</th><?php endif; ?>
-            <th>Dropped side</th><th>Price</th><th>Drop</th><th>Possible explanation</th>
+            <th>Side</th><th>Price</th><th>Drop</th><th data-nosort>Possible explanation</th>
         </tr></thead>
         <tbody>
         <?php foreach ($rows as $r):
-            $kw  = json_decode((string) ($r['matched_keywords'] ?? '[]'), true) ?: [];
-            $url = safe_external_url($r['article_url']);
+            $kw   = json_decode((string) ($r['matched_keywords'] ?? '[]'), true) ?: [];
+            $url  = safe_external_url($r['article_url']);
+            $pts  = (float) $r['drop_percentage_points'];
+            $side = $r['dropped_side'];
+            $sub  = $side === 'yes' ? $r['yes_subtitle'] : $r['no_subtitle'];
             ?>
             <tr>
-                <td class="nowrap"><?= e(fmt_time($r['detected_at'])) ?></td>
+                <td class="nowrap" data-value="<?= strtotime($r['detected_at']) ?>">
+                    <?= reltime($r['detected_at']) ?>
+                    <div class="muted small"><?= e(fmt_time($r['detected_at'], 'M j, g:i A')) ?></div>
+                </td>
                 <?php if ($showMarket): ?>
-                    <td><a href="<?= e(url('/market.php', ['id' => $r['market_id']])) ?>"><?= e($r['market_title']) ?></a>
-                        <div class="muted small"><?= e($r['event_title']) ?></div></td>
+                    <td data-value="<?= e(strtolower((string) $r['market_title'])) ?>">
+                        <a href="<?= e(url('/market.php', ['id' => $r['market_id']])) ?>"><?= e($r['yes_subtitle'] ?: $r['market_title']) ?></a>
+                        <div class="muted small"><?= e($r['event_title']) ?></div>
+                    </td>
                 <?php endif; ?>
-                <td><?= e(side_label($r)) ?></td>
-                <td class="nowrap"><?= fmt_price($r['previous_price']) ?> → <?= fmt_price($r['current_price']) ?></td>
-                <td class="down nowrap">−<?= e(number_format((float) $r['drop_percentage_points'], 1)) ?> pts</td>
-                <td>
+                <td data-value="<?= e($side) ?>">
+                    <span class="chip chip-<?= e($side) ?>"><?= strtoupper(e($side)) ?></span>
+                    <?php if ($sub): ?><div class="muted small"><?= e($sub) ?></div><?php endif; ?>
+                </td>
+                <td class="nowrap" data-value="<?= (float) $r['current_price'] ?>">
+                    <span class="muted"><?= fmt_price($r['previous_price']) ?></span> → <b><?= fmt_price($r['current_price']) ?></b>
+                </td>
+                <td data-value="<?= $pts ?>">
+                    <div class="drop"><span style="width:<?= min(100, round($pts * 3)) ?>%"></span><b>−<?= e(number_format($pts, 1)) ?></b></div>
+                </td>
+                <td class="explain">
                     <?php if ($r['explanation_status'] === 'article_found' && $url): ?>
-                        <a href="<?= e($url) ?>" target="_blank" rel="noopener noreferrer"><?= e($r['article_title']) ?></a>
+                        <a href="<?= e($url) ?>" target="_blank" rel="noopener noreferrer"><?= icon('news') ?> <?= e($r['article_title']) ?></a>
                         <div class="muted small">
-                            <?= e($r['source_name']) ?> · <?= e(fmt_time($r['article_published_at'])) ?>
-                            · score <?= (int) $r['relevance_score'] ?>
-                            <?php if ($kw): ?> · matched: <?= e(implode(', ', $kw)) ?><?php endif; ?>
+                            <?= e($r['source_name']) ?> · <?= e(fmt_time($r['article_published_at'], 'M j, g:i A')) ?>
+                            · score <b><?= (int) $r['relevance_score'] ?></b>
                         </div>
+                        <?php if ($kw): ?><div class="kw-list"><?php foreach ($kw as $k): ?><span class="kw"><?= e($k) ?></span><?php endforeach; ?></div><?php endif; ?>
                     <?php else: ?>
                         <?= badge($r['explanation_status'] ?? 'pending') ?>
                     <?php endif; ?>
@@ -118,18 +134,20 @@ function render_movements_table(array $rows, bool $showMarket = true): void
         <?php endforeach; ?>
         </tbody>
     </table>
+    </div>
     <?php
 }
 
-function watch_button(int $marketId, bool $watched, string $returnTo): string
+function watch_button(int $marketId, bool $watched, string $returnTo, bool $compact = false): string
 {
     $action = $watched ? 'remove' : 'add';
-    $label  = $watched ? '★ Watching' : '☆ Watch';
+    $label  = $watched ? 'Watching' : 'Watch';
     return '<form method="post" action="' . e(url('/watchlist.php')) . '" class="inline">'
         . csrf_field()
         . '<input type="hidden" name="action" value="' . $action . '">'
         . '<input type="hidden" name="market_id" value="' . $marketId . '">'
         . '<input type="hidden" name="return" value="' . e($returnTo) . '">'
-        . '<button class="btn-watch' . ($watched ? ' on' : '') . '" title="' . ($watched ? 'Remove from' : 'Add to') . ' watchlist">'
-        . $label . '</button></form>';
+        . '<button class="btn-watch' . ($watched ? ' on' : '') . ($compact ? ' compact' : '') . '" title="'
+        . ($watched ? 'Remove from' : 'Add to') . ' watchlist">' . icon('star') . ($compact ? '' : '<span>' . $label . '</span>')
+        . '</button></form>';
 }

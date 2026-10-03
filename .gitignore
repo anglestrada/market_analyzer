@@ -3,3 +3,5 @@
 *.pem
 .venv/
 *.log
+node_modules/
+public/assets/vendor/
