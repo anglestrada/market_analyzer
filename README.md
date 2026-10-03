@@ -81,6 +81,46 @@ NEWS_CONFIDENT_SCORE=8    # keyword score that counts as "enough to identify wha
   4. After the last page, save the best article that scored above 0, or mark the drop `no_explanation_found`.
   Search failures (bad token, daily limit) are saved as `news_search_failed` and retried on the next scan.
 
+## Live evidence (evidence timeline)
+
+Each drop is also checked against four live sources. A source without credentials is skipped, and a failing source
+never fails the scan. Failed sources are retried on the next 2 scans.
+
+| Source | What it adds | Setup |
+|---|---|---|
+| ESPN (unofficial JSON) | Fight status at the drop: pre-fight, round and clock, final result, and fight-total sig. strikes / knockdowns / takedowns when ESPN has them | none (`ESPN_ENABLED=0` to turn off) |
+| Kalshi trades | Who moved the price: contracts bought on the other side between the two scans, one large order vs. a crowd | none (`KALSHI_TRADES_ENABLED=0` to turn off) |
+| X | Posts naming either fighter in the window | `X_BEARER_TOKEN`; paid, capped by `X_MONTHLY_BUDGET` |
+| Reddit | r/MMA live discussion thread comments and posts naming a fighter | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` ("script" app) |
+
+The window is the previous scan's time minus `LIVE_LOOKBACK_MINUTES` (default 20), up to the drop.
+
+**Live keywords.** These are on Admin → Keywords and have *Used for = Live*. Each one has a polarity: good or bad
+for the fighter the post is about, which is the closest name before the phrase. "Talbott looks flat" is bad for
+Talbott, so it fits a drop in Talbott's YES price. "Talbott looks sharp" points the other way and is counted as
+disagreeing. A post only counts when it fits the direction of the drop. Score = the post's net keyword score plus
+1 for each similar post (up to +5).
+
+**Overview panel.** The headline is the strongest item that fits the drop (an ESPN final result outranks posts).
+Below it is the timeline: the best item from each source plus the drop itself, in time order. A "Checked" line
+shows what every source returned.
+
+```ini
+LIVE_LOOKBACK_MINUTES=20
+X_BEARER_TOKEN=...
+X_MAX_POSTS=25            # posts per drop (10–100)
+X_MONTHLY_BUDGET=10       # USD per calendar month; searches stop once a full search would exceed it
+X_COST_PER_POST=0.005
+REDDIT_CLIENT_ID=...
+REDDIT_CLIENT_SECRET=...
+REDDIT_USER_AGENT="php:market_analyzer:1.0 (by /u/yourname)"
+```
+
+Re-run the search for one drop and print the timeline (an X search costs money):
+`php bin/evidence.php latest` or `php bin/evidence.php 123 espn reddit`.
+
+After pulling this change, run `schema.sql` again. It's safe to re-run, and it adds the new columns, tables and live keywords.
+
 ## Notes
 
 - TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3
