@@ -45,8 +45,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 page_header('Log in', null);
 ?>
-<div class="card narrow">
-    <h1>Log in</h1>
+<div class="card narrow auth">
+    <div class="auth-mark"><?= icon('logo') ?></div>
+    <h1>Welcome back</h1>
+    <p class="muted">Sign in to the Kalshi Market Analyzer.</p>
     <?php if ($error): ?><div class="flash flash-error"><?= e($error) ?></div><?php endif; ?>
     <form method="post">
         <?= csrf_field() ?>

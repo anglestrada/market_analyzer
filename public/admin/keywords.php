@@ -51,6 +51,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $keywords = db()->query('SELECT * FROM keywords ORDER BY is_active DESC, category NULLS LAST, score DESC, keyword')->fetchAll();
 
+$freq = chart_keyword_freq(null, null, 1000);
+$hits = array_change_key_case(array_combine($freq['labels'], $freq['values']) ?: [], CASE_LOWER);
+$top  = ['labels' => array_slice($freq['labels'], 0, 12), 'values' => array_slice($freq['values'], 0, 12)];
+
 // Quick tester: paste a headline and see how it scores.
 $test = trim((string) ($_GET['test'] ?? ''));
 $testResult = $test !== '' ? (new MovementAnalyzer(db(), new NewsClient()))->score($test) : null;
@@ -84,8 +88,14 @@ page_header('Keywords', $admin);
 </section>
 
 <section class="card">
+    <div class="card-head"><h2>Keyword hits</h2><span class="muted small">how often each keyword appeared in a saved explanation (all time)</span></div>
+    <div class="chart-box h-260"><canvas data-chart="keywords" data-source="d-kw" data-empty="No explanations saved yet."></canvas></div>
+    <?= json_script('d-kw', $top['labels'] ? $top : null) ?>
+</section>
+
+<section class="card">
     <table class="table">
-        <thead><tr><th>Keyword</th><th>Score</th><th>Category</th><th>Active</th><th></th><th></th></tr></thead>
+        <thead><tr><th>Keyword</th><th>Score</th><th>Category</th><th>Active</th><th>Hits</th><th></th><th></th></tr></thead>
         <tbody>
         <?php foreach ($keywords as $k): $form = 'kw' . (int) $k['id']; ?>
             <tr class="<?= $k['is_active'] ? '' : 'inactive' ?>">
@@ -93,6 +103,7 @@ page_header('Keywords', $admin);
                 <td><input form="<?= $form ?>" type="number" name="score" value="<?= (int) $k['score'] ?>" min="1" max="100" class="num"></td>
                 <td><input form="<?= $form ?>" name="category" value="<?= e($k['category']) ?>"></td>
                 <td><input form="<?= $form ?>" type="checkbox" name="is_active" <?= $k['is_active'] ? 'checked' : '' ?>></td>
+                <td><?= (int) ($hits[strtolower($k['keyword'])] ?? 0) ?></td>
                 <td>
                     <form method="post" id="<?= $form ?>" class="inline">
                         <?= csrf_field() ?><input type="hidden" name="action" value="update"><input type="hidden" name="id" value="<?= (int) $k['id'] ?>">

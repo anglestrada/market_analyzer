@@ -37,6 +37,18 @@ php cron/scan.php --loop                     # second terminal: scan every 5 min
 
 Or use crontab: `*/5 * * * * cd /path/to/market_analyzer && php cron/scan.php >> scan.log 2>&1`
 
+## Charts and front end
+
+The dashboard uses Chart.js (plus the date-fns time adapter and the zoom plugin). Run `npm install` once.
+It copies the browser files into `public/assets/vendor/`, and pages use those local copies. If they're missing,
+pages load the same versions from the jsDelivr CDN instead.
+
+- `public/assets/app.js`: every chart, the dark/light theme toggle, sortable tables, instant filtering (press `/`),
+  relative times, and a 5-minute auto-refresh on the dashboard.
+- `public/assets/app.css`: the theme. Pages pass chart data to `app.js` as JSON (`json_script()`) and mark
+  `<canvas data-chart="...">` elements, so a new chart only needs a builder in `app.js`.
+- Sparklines are server-rendered SVG (`sparkline_svg()`), so hundreds of rows stay fast.
+
 ## Kalshi key
 
 - `K_KEY` is the API **Key ID** (UUID).

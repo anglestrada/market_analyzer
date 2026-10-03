@@ -375,6 +375,7 @@ function log_activity(string $type, ?int $userId = null, ?int $marketId = null, 
 
 require_once __DIR__ . '/src/helpers.php';
 require_once __DIR__ . '/src/queries.php';
+require_once __DIR__ . '/src/charts.php';
 require_once __DIR__ . '/src/KalshiClient.php';
 require_once __DIR__ . '/src/NewsClient.php';
 require_once __DIR__ . '/src/MovementAnalyzer.php';
