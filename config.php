@@ -97,25 +97,10 @@ define('NEWS_PAGE_SIZE', max(1, (int) env('NEWS_PAGE_SIZE', '3')));          // 
 define('NEWS_MAX_PAGES', max(1, (int) env('NEWS_MAX_PAGES', '3')));          // page 1, then 2, then 3 if still unclear
 define('NEWS_CONFIDENT_SCORE', max(1, (int) env('NEWS_CONFIDENT_SCORE', '6')));  // keyword score that counts as "enough"
 
-// Live evidence (searched for every drop, next to the news search). A source with no credentials is skipped.
-define('LIVE_LOOKBACK_MINUTES', max(5, (int) env('LIVE_LOOKBACK_MINUTES', '20')));  // posts/trades from the previous scan minus this
-
-// X (Twitter) — pay per use. Only post reads are requested (no user lookups, which cost more).
-define('X_BEARER_TOKEN', env_any(['X_BEARER_TOKEN', 'TWITTER_BEARER_TOKEN']));
-define('X_API_BASE_URL', rtrim(env('X_API_BASE_URL', 'https://api.x.com/2'), '/'));
-define('X_MAX_POSTS', min(100, max(10, (int) env('X_MAX_POSTS', '25'))));            // per drop; X's minimum is 10
-define('X_MONTHLY_BUDGET', max(0.0, (float) env('X_MONTHLY_BUDGET', '10')));          // USD per calendar month (UTC)
-define('X_COST_PER_POST', max(0.0, (float) env('X_COST_PER_POST', '0.005')));         // USD per post read
-
-// Reddit — app-only OAuth (create a "script" app at https://www.reddit.com/prefs/apps)
-define('REDDIT_CLIENT_ID', env('REDDIT_CLIENT_ID'));
-define('REDDIT_CLIENT_SECRET', env('REDDIT_CLIENT_SECRET'));
-define('REDDIT_USER_AGENT', env('REDDIT_USER_AGENT', 'php:market_analyzer:1.0 (personal research)'));
-define('REDDIT_SUBREDDIT', env('REDDIT_SUBREDDIT', 'MMA'));
-
-// Free sources
+// Evidence for each drop, next to the news search. No API keys needed.
+define('LIVE_LOOKBACK_MINUTES', max(5, (int) env('LIVE_LOOKBACK_MINUTES', '20')));  // plays from the previous scan minus this
+define('ESPN_ENABLED', env('ESPN_ENABLED', '1') === '1');            // unofficial ESPN JSON; fails quietly if it changes
 define('KALSHI_TRADES_ENABLED', env('KALSHI_TRADES_ENABLED', '1') === '1');
-define('ESPN_ENABLED', env('ESPN_ENABLED', '1') === '1');   // unofficial ESPN JSON; fails quietly if it changes
 
 // Scanner / analysis rules
 define('DEFAULT_SPORT', 'UFC');
@@ -127,8 +112,9 @@ const MARKET_STATUSES      = ['open', 'closed', 'settled', 'cancelled', 'unknown
 const SCAN_STATUSES        = ['running', 'completed', 'partial', 'failed'];
 const EXPLANATION_STATUSES = ['article_found', 'no_explanation_found', 'news_search_failed'];
 const ACTIVITY_TYPES       = ['login', 'market_view', 'watchlist_add', 'watchlist_remove'];
-const EVIDENCE_SOURCES     = ['espn', 'x', 'reddit', 'kalshi_trades'];
-const SOURCE_LABELS        = ['news' => 'News', 'espn' => 'ESPN', 'x' => 'X', 'reddit' => 'Reddit', 'kalshi_trades' => 'Kalshi trades'];
+const EVIDENCE_SOURCES     = ['espn', 'espn_plays', 'espn_news', 'kalshi_trades'];
+const SOURCE_LABELS        = ['news' => 'News', 'espn' => 'ESPN fight', 'espn_plays' => 'ESPN plays',
+                              'espn_news' => 'ESPN news', 'kalshi_trades' => 'Kalshi trades'];
 const USER_ROLES           = ['admin', 'user'];
 
 /* -------------------------------------------------------------------------
@@ -413,8 +399,6 @@ require_once __DIR__ . '/src/MovementAnalyzer.php';
 require_once __DIR__ . '/src/Http.php';
 require_once __DIR__ . '/src/FightContext.php';
 require_once __DIR__ . '/src/LiveSignals.php';
-require_once __DIR__ . '/src/XClient.php';
-require_once __DIR__ . '/src/RedditClient.php';
 require_once __DIR__ . '/src/EspnClient.php';
 require_once __DIR__ . '/src/EvidenceCollector.php';
 require_once __DIR__ . '/src/Scanner.php';

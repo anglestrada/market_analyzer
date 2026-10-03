@@ -192,8 +192,9 @@ CREATE INDEX IF NOT EXISTS keywords_active_idx ON keywords (is_active);
 CREATE OR REPLACE TRIGGER keywords_updated_at BEFORE UPDATE ON keywords
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- scope:    news = TheNewsAPI articles · live = X / Reddit posts · both
--- polarity: good / bad for the fighter the text is about (live posts only; news ignores it)
+-- scope:    news/both = also scored for TheNewsAPI articles · live = ESPN only (live-fight phrases)
+--           (ESPN news uses every active keyword)
+-- polarity: good / bad for the fighter the text is about; tells which way an ESPN article points
 ALTER TABLE keywords ADD COLUMN IF NOT EXISTS scope    TEXT NOT NULL DEFAULT 'news';
 ALTER TABLE keywords ADD COLUMN IF NOT EXISTS polarity TEXT NOT NULL DEFAULT 'neutral';
 DO $$ BEGIN
@@ -209,7 +210,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE TABLE IF NOT EXISTS movement_evidence (
     id                BIGSERIAL PRIMARY KEY,
     movement_id       BIGINT      NOT NULL REFERENCES market_movements (id) ON DELETE CASCADE,
-    source            TEXT        NOT NULL CHECK (source IN ('x', 'reddit', 'kalshi_trades', 'espn')),
+    source            TEXT        NOT NULL,
     status            TEXT        NOT NULL CHECK (status IN ('found', 'none', 'failed', 'skipped')),
     stance            TEXT        NOT NULL DEFAULT 'neutral'
                       CHECK (stance IN ('supports', 'contradicts', 'neutral')),
@@ -228,18 +229,16 @@ CREATE TABLE IF NOT EXISTS movement_evidence (
 );
 CREATE INDEX IF NOT EXISTS evidence_status_idx ON movement_evidence (status, collected_at);
 
--- ---------------------------------------------------------------------
--- api_usage (paid API calls, for the X monthly budget)
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS api_usage (
-    id           BIGSERIAL PRIMARY KEY,
-    source       TEXT          NOT NULL,
-    movement_id  BIGINT        REFERENCES market_movements (id) ON DELETE SET NULL,
-    items        INTEGER       NOT NULL DEFAULT 0 CHECK (items >= 0),
-    cost_usd     NUMERIC(10,4) NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
-    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS api_usage_source_time_idx ON api_usage (source, created_at DESC);
+-- X / Reddit were removed: drop their rows and the X budget table, then pin the source list.
+DELETE FROM movement_evidence WHERE source IN ('x', 'reddit');
+DROP TABLE IF EXISTS api_usage;
+ALTER TABLE movement_evidence DROP CONSTRAINT IF EXISTS movement_evidence_source_check;
+ALTER TABLE movement_evidence ADD CONSTRAINT movement_evidence_source_check
+    CHECK (source IN ('espn', 'espn_plays', 'espn_news', 'kalshi_trades'));
+
+-- ESPN's latest view of each bout (records, weight class, odds, status, stats), refreshed by the scanner.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS espn_data       JSONB;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS espn_checked_at TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------
 -- watchlist_items (private, per user, per market)
@@ -288,7 +287,14 @@ INSERT INTO keywords (keyword, score, category) VALUES
     ('interview',        2, 'commentary')
 ON CONFLICT ((LOWER(keyword))) DO NOTHING;
 
--- Live-fight phrases for X / Reddit posts. Polarity is for the fighter the post is about:
+-- News keywords that are clearly bad for the fighter named (used by ESPN news to tell which way an article points).
+-- Only touches rows still at the default 'neutral', so a polarity you set yourself is kept.
+UPDATE keywords SET polarity = 'bad'
+ WHERE polarity = 'neutral'
+   AND LOWER(keyword) IN ('injury', 'injured', 'withdraws', 'withdrawal', 'pulls out', 'suspension', 'suspended',
+                          'illness', 'sick', 'misses weight', 'weight issue', 'dehydration');
+
+-- Live-fight phrases (scored in ESPN news and recaps). Polarity is for the fighter the text is about:
 -- "Talbott looks sharp" → good for Talbott; "Talbott got rocked" → bad for Talbott.
 INSERT INTO keywords (keyword, score, category, scope, polarity) VALUES
     -- good for the fighter

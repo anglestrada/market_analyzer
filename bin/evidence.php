@@ -3,10 +3,9 @@
  * Re-run the live evidence search for a drop and print what each source found.
  *
  *   php bin/evidence.php 123                 all configured sources for movement #123
- *   php bin/evidence.php 123 espn reddit     only these sources (espn, x, reddit, kalshi_trades)
+ *   php bin/evidence.php 123 espn espn_news  only these sources (espn, espn_plays, espn_news, kalshi_trades)
  *   php bin/evidence.php latest              the most recent drop
- *
- * Note: an X search costs money (it counts toward X_MONTHLY_BUDGET).
+ *   php bin/evidence.php fights              refresh ESPN fight info for every open bout and print it
  */
 declare(strict_types=1);
 
@@ -17,11 +16,26 @@ if (PHP_SAPI !== 'cli') {
 require_once __DIR__ . '/../config.php';
 
 $arg = $argv[1] ?? '';
+if ($arg === 'fights') {
+    db()->exec('UPDATE events SET espn_checked_at = NULL');   // force a refresh
+    EvidenceCollector::make(db(), new KalshiClient())->refreshFightInfo(fn($m) => print("$m\n"));
+    $rows = db()->query("SELECT e.event_title, e.espn_data, (SELECT yes_subtitle FROM markets WHERE event_id = e.id LIMIT 1) AS subj
+                           FROM events e WHERE e.status = 'open' AND e.sport = 'UFC' ORDER BY e.event_start_time")->fetchAll();
+    foreach ($rows as $r) {
+        $f = espn_fight_info($r['espn_data'], $r['subj']);
+        echo "\n{$r['event_title']}: " . ($f ? trim(implode(' · ', array_filter([$f['weight_class'], $f['state'], $f['detail'], $f['result']]))) : 'not found on ESPN') . "\n";
+        foreach ($f['fighters'] ?? [] as $x) {
+            printf("  %-24s %-9s odds %-6s %s\n", $x['name'], $x['record'] ?? '—', $x['odds'] ?? '—',
+                $x['stats'] ? json_encode($x['stats']) : '');
+        }
+    }
+    exit(0);
+}
 if ($arg === 'latest') {
     $arg = (string) db()->query('SELECT id FROM market_movements ORDER BY detected_at DESC LIMIT 1')->fetchColumn();
 }
 if (!ctype_digit($arg)) {
-    fwrite(STDERR, "Usage: php bin/evidence.php <movement_id|latest> [espn|x|reddit|kalshi_trades ...]\n");
+    fwrite(STDERR, "Usage: php bin/evidence.php <movement_id|latest|fights> [espn|espn_plays|espn_news|kalshi_trades ...]\n");
     exit(1);
 }
 $only = array_slice($argv, 2) ?: null;

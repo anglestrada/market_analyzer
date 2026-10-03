@@ -510,6 +510,7 @@
     const fmtWhen = new Intl.DateTimeFormat(undefined, { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const when = (iso) => (iso ? fmtWhen.format(new Date(iso)) : '—');
     const fmtClock = new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: 'numeric', minute: '2-digit' });
+    const fmtDay = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     const price = (v) => (v == null ? '—' : `${Number.isInteger(+v) ? +v : (+v).toFixed(1)}¢`);
     const pp = (v) => {
@@ -646,11 +647,12 @@
       const kwList = (list) => (list || []).map((k) => `<span class="kw">${esc(k)}</span>`).join('');
 
       // Evidence timeline: best item per source + the drop, in time order.
-      const dropDay = a.drop ? new Date(a.drop.at).toDateString() : '';
+      const dayOf = (d) => fmtDay.format(d);   // calendar day in the app's time zone
+      const dropDay = a.drop ? dayOf(new Date(a.drop.at)) : '';
       const clock = (iso) => {
         if (!iso) return '—';
         const d = new Date(iso);
-        return d.toDateString() === dropDay ? fmtClock.format(d) : when(iso);
+        return dayOf(d) === dropDay ? fmtClock.format(d) : when(iso);
       };
       const stance = (s) => ({
         supports: '<span class="stance stance-supports" title="Fits the direction of the drop">fits</span>',
@@ -710,6 +712,41 @@
       }
     }
 
+    /* ----- ESPN fight info (records, odds, status, stats) ----- */
+    function fightInfo(f) {
+      if (!f || !(f.fighters || []).length) return '';
+      const last = (n) => String(n || '').replace(/,?\s+(jr|sr|ii|iii)\.?$/i, '').split(/\s+/).pop();
+      const state = f.state === 'pre'
+        ? `Scheduled${f.start ? ` · ${esc(when(f.start))}` : ''}`
+        : f.state === 'in'
+          ? `<b class="live-dot">Live</b> · ${esc(f.detail || `R${f.round ?? '?'} ${f.clock ?? ''}`)}`
+          : `Final${f.result ? ` · ${esc(f.result)}` : ''}${f.round ? ` · R${f.round}${f.clock ? ` ${esc(f.clock)}` : ''}` : ''}`;
+      const hasStats = f.fighters.some((x) => x.stats && x.stats.sig != null);
+      const hasOdds = f.fighters.some((x) => x.odds != null);
+      const ml = (v) => (v == null ? '—' : `${v > 0 ? '+' : ''}${v}`);
+      const rows = f.fighters.map((x) => `
+        <tr class="${x.subject ? 'is-subject' : ''}">
+          <td>${esc(last(x.name))}${x.winner ? ' <span class="win" title="Winner">W</span>' : ''}</td>
+          <td class="num">${esc(x.record || '—')}</td>
+          ${hasOdds ? `<td class="num" title="${x.implied != null ? `${x.implied}% implied` : ''}">${ml(x.odds)}</td>` : ''}
+          ${hasStats ? `<td class="num">${x.stats?.sig ?? '—'}</td><td class="num">${x.stats?.td ?? 0}</td><td class="num">${x.stats?.kd ?? 0}</td>` : ''}
+        </tr>`).join('');
+      const judges = f.fighters.every((x) => x.rounds && Object.keys(x.rounds).length)
+        ? `<p class="fight-meta">Judges: ${Object.keys(f.fighters[0].rounds).map((r) => `R${r} ${f.fighters.map((x) => x.rounds[r] ?? '–').join('–')}`).join(' · ')}</p>`
+        : '';
+      const meta = [f.weight_class, f.rounds ? `${f.rounds} rounds` : null, f.venue].filter(Boolean).map(esc).join(' · ');
+      return `
+        <h3 class="tl-head">Fight info · ESPN</h3>
+        <p class="fight-state">${state}</p>
+        ${meta ? `<p class="fight-meta">${meta}</p>` : ''}
+        <table class="fight-table">
+          <thead><tr><th></th><th class="num">Record</th>${hasOdds ? `<th class="num" title="${esc(f.odds_source || 'Sportsbook')} moneyline">${esc(f.odds_source || 'Odds')}</th>` : ''}${hasStats ? '<th class="num" title="Significant strikes">Sig</th><th class="num" title="Takedowns">TD</th><th class="num" title="Knockdowns">KD</th>' : ''}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        ${judges}
+        <p class="news-note">${f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">ESPN fight center</a> · ` : ''}updated ${esc(when(f.checked_at))}</p>`;
+    }
+
     /* ----- header, price, footer ----- */
     function render() {
       const d = state.data;
@@ -753,6 +790,7 @@
 
       drawChart(d);
       renderNews(d.analysis || { status: 'none' }, m);
+      el('news-body').insertAdjacentHTML('beforeend', fightInfo(d.fight));
     }
 
     /* ----- loading ----- */

@@ -2,8 +2,11 @@
 declare(strict_types=1);
 
 /**
- * Scores live posts (X, Reddit) with the "live" keyword rules and works out whether a post
- * fits the drop: "Talbott looks flat" fits a drop in Talbott's YES price; "Talbott looks sharp" doesn't.
+ * Scores ESPN text (news headlines/descriptions) with the keyword rules and works out whether it fits the drop.
+ *
+ * Every active keyword adds to the relevance score. Keywords with a polarity (good / bad for the fighter the
+ * text is about) also give a direction: "Talbott withdraws" is bad for Talbott, so it fits a drop in Talbott's
+ * YES price; "Talbott looks sharp" points the other way.
  */
 final class LiveSignals
 {
@@ -12,8 +15,8 @@ final class LiveSignals
     public function __construct(private PDO $db) {}
 
     /**
-     * @return array{net:int, strength:int, stance:string, fighter:?string, matched:string[]}|null
-     *         null when the post has no live keyword tied to a fighter in this bout.
+     * @return array{net:int, relevance:int, stance:string, fighter:?string, matched:string[]}|null
+     *         null when the text names no fighter in this bout or matches no keyword.
      *         net > 0 = good for the market's fighter (the subject), net < 0 = bad for him.
      */
     public function analyze(string $text, FightContext $ctx): ?array
@@ -42,29 +45,26 @@ final class LiveSignals
             }
             $kept[] = $h;
         }
+        if (!$kept) {
+            return null;
+        }
 
-        $net     = 0;
-        $abs     = 0;
-        $matched = [];
-        $about   = [];
+        $net       = 0;
+        $relevance = 0;
+        $matched   = [];
+        $about     = [];
         foreach ($kept as $h) {
+            $relevance += (int) $h['rule']['score'];
+            $matched[]  = $h['rule']['keyword'];
             $sign = ['good' => 1, 'bad' => -1][$h['rule']['polarity']] ?? 0;
-            if ($sign === 0) {
-                continue;
-            }
             $fighter = $ctx->fighterAt($mentions, $h['start']);
-            if ($fighter === null) {
+            if ($sign === 0 || $fighter === null) {
                 continue;
             }
             // Good for the opponent = bad for the subject.
             $forSubject = ($ctx->subject !== null && $fighter !== $ctx->subject) ? -$sign : $sign;
             $net += $forSubject * (int) $h['rule']['score'];
-            $abs += (int) $h['rule']['score'];
-            $matched[]       = $h['rule']['keyword'];
             $about[$fighter] = true;
-        }
-        if (!$matched) {
-            return null;
         }
 
         $expected = $ctx->expectedDirection();
@@ -72,90 +72,18 @@ final class LiveSignals
         $stance   = ($expected === null || $dir === 0) ? 'neutral' : ($dir === $expected ? 'supports' : 'contradicts');
 
         return [
-            'net'      => $net,
-            'strength' => $abs,
-            'stance'   => $stance,
-            'fighter'  => count($about) === 1 ? array_key_first($about) : null,
-            'matched'  => array_values(array_unique($matched)),
-        ];
-    }
-
-    /**
-     * Picks the best post that fits the drop and counts how many others agree / disagree.
-     *
-     * @param array<int, array{text:string, at:?string, url:?string, author:?string, engagement:int}> $posts
-     * @return array evidence row values (status, stance, score, headline, detail, url, occurred_at, item_count, matched_keywords, raw)
-     */
-    public function summarize(array $posts, FightContext $ctx, string $sourceLabel): array
-    {
-        $support = [];
-        $against = 0;
-        foreach ($posts as $p) {
-            $a = $this->analyze($p['text'], $ctx);
-            if ($a === null) {
-                continue;
-            }
-            if ($a['stance'] === 'supports') {
-                $support[] = $p + ['analysis' => $a];
-            } elseif ($a['stance'] === 'contradicts') {
-                $against++;
-            }
-        }
-
-        $checked = count($posts);
-        if (!$support) {
-            return [
-                'status'     => 'none',
-                'detail'     => "$checked post" . ($checked === 1 ? '' : 's') . ' checked'
-                    . ($against ? ", $against pointed the other way" : ', none matched the live keyword rules'),
-                'item_count' => $checked,
-            ];
-        }
-
-        usort($support, fn($a, $b) => [abs($b['analysis']['net']), $b['engagement']] <=> [abs($a['analysis']['net']), $a['engagement']]);
-        $best    = $support[0];
-        $similar = count($support) - 1;
-        $matched = array_values(array_unique(array_merge(...array_map(fn($p) => $p['analysis']['matched'], $support))));
-
-        $detail = [];
-        if ($best['author']) {
-            $detail[] = $best['author'];
-        }
-        if ($similar > 0) {
-            $detail[] = "$similar similar post" . ($similar === 1 ? '' : 's');
-        }
-        if ($against > 0) {
-            $detail[] = "$against disagree" . ($against === 1 ? 's' : '');
-        }
-        $detail[] = "$checked checked";
-
-        return [
-            'status'           => 'found',
-            'stance'           => 'supports',
-            'score'            => min(20, abs($best['analysis']['net']) + min(5, $similar)),
-            'headline'         => '“' . Http::snippet($best['text'], 200) . '”',
-            'detail'           => implode(' · ', $detail),
-            'url'              => $best['url'],
-            'occurred_at'      => $best['at'],
-            'item_count'       => count($support),
-            'matched_keywords' => $matched,
-            'raw'              => [
-                'source'  => $sourceLabel,
-                'checked' => $checked,
-                'against' => $against,
-                'top'     => array_map(fn($p) => [
-                    'text' => Http::snippet($p['text'], 280), 'at' => $p['at'], 'url' => $p['url'],
-                    'net'  => $p['analysis']['net'], 'matched' => $p['analysis']['matched'],
-                ], array_slice($support, 0, 5)),
-            ],
+            'net'       => $net,
+            'relevance' => $relevance,
+            'stance'    => $stance,
+            'fighter'   => count($about) === 1 ? array_key_first($about) : null,
+            'matched'   => array_values(array_unique($matched)),
         ];
     }
 
     private function rules(): array
     {
         return $this->rules ??= $this->db->query(
-            "SELECT keyword, score, polarity FROM keywords
-              WHERE is_active = TRUE AND scope IN ('live', 'both') AND polarity <> 'neutral'"
+            'SELECT keyword, score, polarity FROM keywords WHERE is_active = TRUE ORDER BY score DESC'
         )->fetchAll();
     }
 }
