@@ -4,7 +4,7 @@ declare(strict_types=1);
 /**
  * One scan = handoff §4 workflow:
  *  scan_run → fetch open UFC events/markets → upsert metadata → snapshot →
- *  compare with previous snapshot → movements → NewsAPI analysis → finish scan_run.
+ *  compare with previous snapshot → movements → TheNewsAPI analysis → finish scan_run.
  */
 final class Scanner
 {
@@ -120,7 +120,7 @@ final class Scanner
         foreach ($newMoves as $movementId) {
             try {
                 $result = $this->analyzer->analyze($movementId);
-                $this->say("Movement #$movementId → $result");
+                $this->say("Movement #$movementId → " . ($this->analyzer->lastSummary ?: $result));
             } catch (Throwable $e) {
                 $errors[] = "News for movement #$movementId: " . $e->getMessage();
             }
@@ -326,10 +326,10 @@ final class Scanner
         foreach ($ids as $id) {
             try {
                 $result = $this->analyzer->analyze((int) $id);
-                $this->say("Retried news for movement #$id → $result");
+                $this->say("Retried news for movement #$id → " . ($this->analyzer->lastSummary ?: $result));
             } catch (Throwable $e) {
                 $errors[] = "News retry for movement #$id: " . $e->getMessage();
-                break;   // NewsAPI is probably down/rate-limited; try again next scan
+                break;   // TheNewsAPI is probably down or out of requests; try again next scan
             }
         }
     }

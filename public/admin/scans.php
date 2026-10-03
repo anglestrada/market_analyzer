@@ -54,7 +54,9 @@ page_header('Scans', $admin);
 <div class="stat-chips">
     <div><span>Kalshi requests</span><b><?= kalshi_auth_available() ? 'signed' : 'public' ?></b></div>
     <div><span>Series</span><b><?= e(KALSHI_UFC_SERIES) ?></b></div>
-    <div><span>NewsAPI</span><b><?= NEWSAPI_KEY ? 'configured' : 'missing key' ?></b></div>
+    <div><span>TheNewsAPI</span><b><?= NEWS_API_TOKEN ? 'configured' : 'missing token' ?></b></div>
+    <div><span>News search</span><b><?= NEWS_PAGE_SIZE ?> per page · up to <?= NEWS_MAX_PAGES ?> pages</b></div>
+    <div><span>"Enough" score</span><b>≥ <?= NEWS_CONFIDENT_SCORE ?></b></div>
     <div><span>News lookback</span><b><?= NEWS_LOOKBACK_HOURS ?>h</b></div>
 </div>
 

@@ -3,7 +3,7 @@ Kalshi Market Analyzer
 
 Kalshi Market Analyzer is a data-analysis dashboard that tracks Kalshi markets, beginning with UFC events and later expanding into other sports.
 
-The application records market prices over time and identifies significant movements between scans. When a market moves beyond a defined threshold, the system searches NewsAPI for potentially relevant articles and ranks them using keyword-based scoring.
+The application records market prices over time and identifies significant movements between scans. When a market moves beyond a defined threshold, the system searches TheNewsAPI for potentially relevant articles and ranks them using keyword-based scoring.
 
 For example, an article mentioning an injury may receive a higher relevance score than one mentioning dehydration. The system displays the market movement, possible explanations, article titles, article links, timestamps, and historical price data.
 
@@ -27,7 +27,7 @@ public/               web root: markets, market detail + chart, movements, watch
 
 ```bash
 composer require phpseclib/phpseclib:~3.0   # adds the RSA-PSS library used for Kalshi signing
-cp .env.example .env                         # fill in DB_*, K_KEY, KALSHI_PRIVATE_KEY_PATH, NEWSAPI_KEY
+# create .env next to config.php and fill in DB_*, KALSHI_ACCESS_KEY, KALSHI_PRIVATE_KEY_PATH, THENEWSAPI_TOKEN
 psql -h localhost -U <user> -d <db> -f schema.sql
 php bin/create_user.php you@example.com admin
 php cron/scan.php                            # first scan; prints what it did
@@ -49,6 +49,15 @@ pages load the same versions from the jsDelivr CDN instead.
   `<canvas data-chart="...">` elements, so a new chart only needs a builder in `app.js`.
 - Sparklines are server-rendered SVG (`sparkline_svg()`), so hundreds of rows stay fast.
 
+## News settings (.env)
+
+```ini
+THENEWSAPI_TOKEN=your_thenewsapi_token
+NEWS_PAGE_SIZE=3          # articles per request (free plan max is 3)
+NEWS_MAX_PAGES=3          # how many pages to try before giving up
+NEWS_CONFIDENT_SCORE=8    # keyword score that counts as "enough to identify what happened"
+```
+
 ## Kalshi key
 
 - `K_KEY` is the API **Key ID** (UUID).
@@ -64,11 +73,16 @@ pages load the same versions from the jsDelivr CDN instead.
   creates one movement record.
 - Markets that leave the open list get one final snapshot, their status is updated, and they are no longer scanned.
   The jump at settlement is not counted as a movement.
-- For each movement, the scanner searches NewsAPI for both fighters' names over the previous 48 hours and scores the
-  results with the active keyword rules. Only the top article (score > 0) is saved; otherwise the movement is marked
-  `no_explanation_found`. NewsAPI failures are saved as `news_search_failed` and retried on the next scan.
+- For each movement, the scanner searches [TheNewsAPI](https://www.thenewsapi.com) for both fighters' names over the
+  previous 48 hours, sorted by relevance, 3 articles at a time:
+  1. Score the 3 articles with the active keyword rules. An article that doesn't name either fighter scores 0.
+  2. If one scores at least `NEWS_CONFIDENT_SCORE` (default 8), that's enough: save it and stop.
+  3. Otherwise request the next page (the next 3), up to `NEWS_MAX_PAGES` (default 3 pages = 9 articles).
+  4. After the last page, save the best article that scored above 0, or mark the drop `no_explanation_found`.
+  Search failures (bad token, daily limit) are saved as `news_search_failed` and retried on the next scan.
 
 ## Notes
 
-- NewsAPI's free Developer plan only works from localhost, allows 100 requests per day, and delays articles by about 24 hours.
+- TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3
+  requests, so lower `NEWS_MAX_PAGES` if you hit the limit.
 - Snapshots keep the raw Kalshi JSON permanently, so the database grows by tens of MB per day.
