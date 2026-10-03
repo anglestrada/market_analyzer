@@ -21,7 +21,7 @@ final class EspnClient
      */
     public function findFight(FightContext $ctx, DateTimeInterface $at, ?DateTimeInterface $eventStart = null): ?array
     {
-        $tz    = new DateTimeZone('America/New_York');
+        $tz    = new DateTimeZone('America/Los_Angeles');
         $days  = [];
         foreach (array_filter([$at, $eventStart]) as $d) {
             $local = DateTimeImmutable::createFromInterface($d)->setTimezone($tz);

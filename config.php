@@ -45,7 +45,7 @@ define('APP_ENV', env('APP_ENV', 'local'));
 define('APP_DEBUG', APP_ENV !== 'production');
 define('APP_URL', rtrim(env('APP_URL', 'http://localhost:3000'), '/'));
 define('BASE_PATH', rtrim((string) (parse_url(APP_URL, PHP_URL_PATH) ?? ''), '/'));   // e.g. "/kalshi" under XAMPP
-define('APP_TIMEZONE', env('APP_TIMEZONE', 'America/New_York'));                     // display only; DB stays UTC
+define('APP_TIMEZONE', env('APP_TIMEZONE', 'America/Los_Angeles'));                     // display only; DB stays UTC
 
 /* -------------------------------------------------------------------------
  * 2. PHP runtime / error handling
