@@ -132,6 +132,7 @@ function render_movements_table(array $rows, bool $showMarket = true): void
                     <span class="muted"><?= fmt_price($r['previous_price']) ?></span> → <b><?= fmt_price($r['current_price']) ?></b>
                 </td>
                 <td data-value="<?= $pts ?>">
+                    <?php if (($r['movement_type'] ?? 'drop') === 'close'): ?><span class="src-chip" title="Kalshi closed the market; this is the jump in its final snapshot">closed</span><?php endif; ?>
                     <div class="drop" title="<?= e(strtoupper($side)) ?> fell <?= e(number_format($pts, 1)) ?> percentage points"><span style="width:<?= min(100, round($pts * 3)) ?>%"></span><b>−<?= e(number_format($pts, 1)) ?> pp</b></div>
                 </td>
                 <td class="explain">

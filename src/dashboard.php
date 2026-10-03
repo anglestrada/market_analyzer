@@ -267,7 +267,7 @@ function market_best_explanation(int $marketId): array
 function movement_explanation(int $movementId): array
 {
     $q = db()->prepare(
-        "SELECT mm.id, mm.detected_at, mm.dropped_side, mm.drop_percentage_points, mm.previous_price, mm.current_price,
+        "SELECT mm.id, mm.detected_at, mm.dropped_side, mm.drop_percentage_points, mm.previous_price, mm.current_price, mm.movement_type,
                 COALESCE(ma.explanation_status, 'pending') AS status, ma.relevance_score, ma.matched_keywords,
                 a.title, a.url, a.description, a.source_name, a.published_at
            FROM market_movements mm
@@ -291,14 +291,21 @@ function movement_explanation(int $movementId): array
             'pts'  => $pts,
             'from' => cents_or_null($row['previous_price']),
             'to'   => cents_or_null($row['current_price']),
+            'type' => $row['movement_type'] ?? 'drop',
         ],
     ];
+    $isClose = ($row['movement_type'] ?? 'drop') === 'close';
+    if ($isClose && $row['status'] === 'pending') {
+        $out['status'] = 'close';   // TheNewsAPI isn't searched for a market close
+    }
 
     $items   = [];
     $checked = [];
 
     // News (TheNewsAPI)
-    $checked[] = ['source' => 'news', 'label' => SOURCE_LABELS['news'], 'status' => $row['status'], 'note' => null];
+    $checked[] = ['source' => 'news', 'label' => SOURCE_LABELS['news'],
+        'status' => $isClose && $row['status'] === 'pending' ? 'skipped' : $row['status'],
+        'note'   => $isClose ? 'Not searched for a market close' : null];
     if ($row['status'] === 'article_found') {
         $out['article'] = [
             'title'        => $row['title'],
@@ -374,7 +381,7 @@ function movement_explanation(int $movementId): array
     $out['headline'] = $candidates[0] ?? null;
 
     $items[] = [
-        'source' => 'drop', 'label' => 'Drop', 'at' => iso($row['detected_at']),
+        'source' => 'drop', 'label' => $isClose ? 'Market closed' : 'Drop', 'at' => iso($row['detected_at']),
         'headline' => sprintf('%s −%s pp (%s¢ → %s¢)', $side, number_format($pts, 1),
             rtrim(rtrim(number_format((float) $row['previous_price'] * 100, 1), '0'), '.'),
             rtrim(rtrim(number_format((float) $row['current_price'] * 100, 1), '0'), '.')),

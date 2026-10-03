@@ -634,12 +634,12 @@
     }
 
     /* ----- news context ----- */
-    function renderNews(a, market) {
+    function renderNews(a, market, fight) {
       const body = el('news-body');
       const drop = a.drop
         ? `<span class="side side-${a.drop.side}">${a.drop.side.toUpperCase()}</span><span class="delta down">−${a.drop.pts.toFixed(1)} pp</span>`
         : '';
-      const dropText = a.drop ? `${a.drop.side.toUpperCase()} −${a.drop.pts.toFixed(1)} pp drop on ${when(a.drop.at)}` : '';
+      const dropText = a.drop ? `${a.drop.side.toUpperCase()} −${a.drop.pts.toFixed(1)} pp ${a.drop.type === 'close' ? 'fall' : 'drop'} on ${when(a.drop.at)}` : '';
       const status = (tone, title, text) => `<div class="news-status${tone ? ` tone-${tone}` : ''}"><b>${title}</b><p>${text}</p></div>`;
       const link = (text, url, cls = '') => (url
         ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`
@@ -687,7 +687,7 @@
           <span class="news-meta">${art ? `${esc(art.source || 'Unknown source')} · Published ${esc(when(art.published_at))}` : esc(h.detail || '')}</span>
           ${art?.description ? `<p class="news-desc">${esc(art.description)}</p>` : ''}
           <dl class="facts">
-            <dt>Drop</dt><dd>${drop}</dd>
+            <dt>${a.drop?.type === 'close' ? 'Fell before close' : 'Drop'}</dt><dd>${drop}</dd>
             <dt>Detected</dt><dd>${esc(when(a.drop?.at))}</dd>
             ${(h.keywords || []).length ? `<dt>Matched keywords</dt><dd><span class="kw-list">${kwList(h.keywords)}</span></dd>` : ''}
             ${a.drops > 1 ? `<dt>Drops recorded</dt><dd>${a.drops}</dd>` : ''}
@@ -706,6 +706,14 @@
       } else if (a.status === 'pending') {
         body.innerHTML = status('', 'Analysis pending',
           `A ${esc(dropText)} was detected. The searches run at the end of the scan.`) + timeline + checked;
+      } else if (a.status === 'close') {
+        body.innerHTML = status('', 'Market closed, waiting for ESPN',
+          `Kalshi closed this market after the ${esc(dropText)}. The fight result is filled in once ESPN posts it (checked every scan for about an hour).`)
+          + timeline + checked;
+      } else if (fight && fight.state === 'post' && market.status !== 'open') {
+        const winner = (fight.fighters || []).find((x) => x.winner);
+        body.innerHTML = status('', winner ? `Final: ${esc(winner.name)} won` : 'Fight over',
+          `${esc([fight.result, fight.round ? `R${fight.round}` : null, fight.clock].filter(Boolean).join(' '))}. No drop of ${esc(threshold)} pp or more was recorded before Kalshi closed the market.`);
       } else {
         body.innerHTML = status('', 'No significant drop yet',
           `News is searched only after YES or NO falls by at least ${esc(threshold)} pp between two scans. ${market.status === 'open' ? 'This market hasn\'t had one yet.' : 'This market never had one.'}`);
@@ -789,7 +797,7 @@
         : '';
 
       drawChart(d);
-      renderNews(d.analysis || { status: 'none' }, m);
+      renderNews(d.analysis || { status: 'none' }, m, d.fight);
       el('news-body').insertAdjacentHTML('beforeend', fightInfo(d.fight));
     }
 

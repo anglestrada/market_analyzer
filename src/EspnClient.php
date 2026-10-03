@@ -38,9 +38,46 @@ final class EspnClient
         return array_values(array_unique($days));
     }
 
+    /** Set when ESPN answers 429/403: no more ESPN calls for the rest of this scan. */
+    private ?string $blocked = null;
+
+    /** @var array<string, array> news feed responses, cached for this run */
+    private array $feeds = [];
+
     public function scoreboard(string $day): array
     {
-        return $this->boards[$day] ??= Http::json('GET', $this->siteUrl . '/ufc/scoreboard?' . http_build_query(['dates' => $day]), [], null, 12);
+        if (!array_key_exists($day, $this->boards)) {
+            try {
+                $this->boards[$day] = $this->get($this->siteUrl . '/ufc/scoreboard?' . http_build_query(['dates' => $day]), 12);
+            } catch (Throwable $e) {
+                $this->boards[$day] = $e;   // don't ask again for every bout on the card
+            }
+        }
+        if ($this->boards[$day] instanceof Throwable) {
+            throw $this->boards[$day];
+        }
+        return $this->boards[$day];
+    }
+
+    public function requestCount(): int
+    {
+        return array_sum(array_intersect_key(Http::$counts, array_flip(['site.api.espn.com', 'sports.core.api.espn.com'])));
+    }
+
+    /** Every ESPN request goes through here so a rate limit stops the rest of the scan's ESPN calls. */
+    private function get(string $url, int $timeout = 10): array
+    {
+        if ($this->blocked !== null) {
+            throw new HttpException("Skipped: ESPN refused an earlier request this scan ({$this->blocked}); trying again next scan.", 429);
+        }
+        try {
+            return Http::json('GET', $url, [], null, $timeout);
+        } catch (HttpException $e) {
+            if (in_array($e->httpStatus, [403, 429], true)) {
+                $this->blocked = "HTTP {$e->httpStatus}";
+            }
+            throw $e;
+        }
     }
 
     /**
@@ -203,21 +240,32 @@ final class EspnClient
      */
     public function news(array $athleteIds = []): array
     {
-        $feeds = [$this->siteUrl . '/news?limit=50'];
+        // UFC feed (falls back to the all-MMA feed), then each fighter's own feed.
+        $feeds = [[$this->siteUrl . '/ufc/news?limit=50', $this->siteUrl . '/news?limit=50']];
         foreach (array_filter(array_unique($athleteIds)) as $id) {
-            $feeds[] = $this->siteUrl . '/ufc/athletes/' . rawurlencode((string) $id) . '/news?limit=25';
+            $feeds[] = [$this->siteUrl . '/ufc/athletes/' . rawurlencode((string) $id) . '/news?limit=25'];
         }
-        $out  = [];
-        $seen = [];
-        foreach ($feeds as $i => $url) {
-            try {
-                $data = Http::json('GET', $url, [], null, 10);
-            } catch (Throwable $e) {
-                if ($i === 0) {
-                    throw $e;   // main feed down → report; a missing fighter feed is fine
+        $out    = [];
+        $seen   = [];
+        $errors = [];
+        $ok     = 0;
+        foreach ($feeds as $urls) {
+            $data = null;
+            foreach ($urls as $url) {
+                try {
+                    $data = $this->feeds[$url] ??= $this->get($url);
+                    break;
+                } catch (Throwable $e) {
+                    $errors[] = $e->getMessage();
+                    if ($this->blocked !== null) {
+                        break 2;
+                    }
                 }
+            }
+            if ($data === null) {
                 continue;
             }
+            $ok++;
             foreach ($data['articles'] ?? $data['feed'] ?? [] as $a) {
                 $title = trim((string) ($a['headline'] ?? $a['title'] ?? ''));
                 $link  = $a['links']['web']['href'] ?? null;
@@ -236,6 +284,9 @@ final class EspnClient
                 ];
             }
         }
+        if ($ok === 0 && $errors) {
+            throw new HttpException('ESPN news unavailable: ' . $errors[0]);
+        }
         usort($out, fn($a, $b) => strtotime((string) $b['at']) <=> strtotime((string) $a['at']));
         return $out;
     }
@@ -244,16 +295,32 @@ final class EspnClient
      * findFight() plus odds, fight-total stats and round scores (stats/rounds only once the fight has started).
      * This is what gets saved in events.espn_data.
      */
-    public function fightDetails(FightContext $ctx, array $days): ?array
+    public function fightDetails(FightContext $ctx, array $days, ?array $previous = null): ?array
     {
         $fight = $this->findFight($ctx, $days);
         if ($fight === null || $fight['event_id'] === '' || $fight['comp_id'] === '') {
             return $fight;
         }
-        $fight['odds'] = $this->odds($fight);
+        $same = $previous && ($previous['comp_id'] ?? null) === $fight['comp_id'];
+
+        // Odds barely move: refetch at most hourly.
+        if ($same && !empty($previous['odds_at']) && time() - strtotime($previous['odds_at']) < 3600) {
+            $fight['odds']    = $previous['odds'] ?? null;
+            $fight['odds_at'] = $previous['odds_at'];
+        } else {
+            $fight['odds']    = $this->odds($fight);
+            $fight['odds_at'] = gmdate(DATE_ATOM);
+        }
+
+        // Stats and round scores: every refresh while the fight is on; once it's final, keep what we have.
         if ($fight['state'] !== 'pre') {
-            $fight['stats']      = $this->stats($fight);
-            $fight['linescores'] = $this->linescores($fight);
+            if ($same && ($previous['state'] ?? '') === 'post' && !empty($previous['stats'])) {
+                $fight['stats']      = $previous['stats'];
+                $fight['linescores'] = $previous['linescores'] ?? [];
+            } else {
+                $fight['stats']      = $this->stats($fight);
+                $fight['linescores'] = $this->linescores($fight);
+            }
         }
         $fight['url']        = self::fightUrl($fight);
         $fight['checked_at'] = gmdate(DATE_ATOM);
@@ -276,9 +343,9 @@ final class EspnClient
     private function core(string $path, array $query = []): array
     {
         try {
-            return Http::json('GET', $this->coreUrl . $path . ($query ? '?' . http_build_query($query) : ''), [], null, 8);
+            return $this->get($this->coreUrl . $path . ($query ? '?' . http_build_query($query) : ''), 8);
         } catch (Throwable) {
-            return [];
+            return [];   // optional extras: leave them out
         }
     }
 

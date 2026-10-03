@@ -15,6 +15,7 @@ declare(strict_types=1);
 final class EvidenceCollector
 {
     private const MAX_ATTEMPTS = 3;
+    private const MAX_ESPN_RESULT_ATTEMPTS = 12;   // ~1 hour of scans waiting for ESPN to post a result
 
     /** Human-readable summary of the last collect() call, for the scan log. */
     public string $lastSummary = '';
@@ -98,7 +99,8 @@ final class EvidenceCollector
     {
         $rows = $this->db->query(
             "SELECT movement_id, array_agg(source) AS sources FROM movement_evidence
-              WHERE status = 'failed' AND attempts < " . self::MAX_ATTEMPTS . "
+              WHERE status = 'failed'
+                AND attempts < CASE WHEN source = 'espn' THEN " . self::MAX_ESPN_RESULT_ATTEMPTS . ' ELSE ' . self::MAX_ATTEMPTS . " END
                 AND collected_at < NOW() - INTERVAL '4 minutes'
               GROUP BY movement_id ORDER BY MIN(collected_at) LIMIT " . max(1, $limit)
         )->fetchAll();
@@ -115,21 +117,35 @@ final class EvidenceCollector
     }
 
     /**
-     * Saves ESPN's view of every open bout in events.espn_data (once per scan while a fight is on,
-     * otherwise hourly). Two or three scoreboard requests cover a whole card.
+     * Saves ESPN's view of each bout in events.espn_data (once per scan while a fight is on, otherwise hourly).
+     * Bouts whose Kalshi market already closed keep being refreshed (for up to a day) until ESPN posts the
+     * result, because Kalshi usually closes the market before ESPN marks the fight final.
+     * Two or three scoreboard requests cover a whole card.
+     *
+     * @param int[]|null $eventIds only these events, ignoring the schedule (used by bin/evidence.php)
      */
-    public function refreshFightInfo(?callable $say = null): void
+    public function refreshFightInfo(?callable $say = null, ?array $eventIds = null): void
     {
         if ($this->espn === null) {
             return;
         }
-        $stmt = $this->db->prepare(
-            "SELECT id, event_title, event_start_time, espn_data->>'state' AS espn_state, espn_checked_at
-               FROM events
-              WHERE sport = :sport AND status = 'open'
-                AND (event_start_time IS NULL OR event_start_time BETWEEN NOW() - INTERVAL '1 day' AND NOW() + INTERVAL '10 days')"
-        );
-        $stmt->execute([':sport' => DEFAULT_SPORT]);
+        if ($eventIds !== null) {
+            $stmt = $this->db->prepare(
+                "SELECT id, event_title, event_start_time, espn_data, espn_data->>'state' AS espn_state, NULL AS espn_checked_at, status
+                   FROM events WHERE id = ANY(CAST(:ids AS bigint[]))"
+            );
+            $stmt->execute([':ids' => '{' . implode(',', array_map('intval', $eventIds)) . '}']);
+        } else {
+            $stmt = $this->db->prepare(
+                "SELECT id, event_title, event_start_time, espn_data, espn_data->>'state' AS espn_state, espn_checked_at, status
+                   FROM events
+                  WHERE sport = :sport
+                    AND (event_start_time IS NULL OR event_start_time BETWEEN NOW() - INTERVAL '1 day' AND NOW() + INTERVAL '10 days')
+                    AND (status = 'open'
+                         OR (COALESCE(espn_data->>'state', '') <> 'post' AND event_start_time IS NOT NULL))"
+            );
+            $stmt->execute([':sport' => DEFAULT_SPORT]);
+        }
 
         $save = $this->db->prepare('UPDATE events SET espn_data = COALESCE(:d, espn_data), espn_checked_at = NOW() WHERE id = :id');
         $done = 0; $found = 0;
@@ -137,14 +153,16 @@ final class EvidenceCollector
             $start   = $e['event_start_time'] ? strtotime($e['event_start_time']) : null;
             $soon    = $start === null || $start - time() < 3 * 3600;
             $checked = $e['espn_checked_at'] ? strtotime($e['espn_checked_at']) : 0;
-            $live    = in_array($e['espn_state'], ['in'], true) || ($soon && $e['espn_state'] !== 'post');
+            $waitingForResult = $e['status'] !== 'open' && $e['espn_state'] !== 'post';
+            $live    = $waitingForResult || $e['espn_state'] === 'in' || ($soon && $e['espn_state'] !== 'post');
             if (!$live && time() - $checked < 3600) {
                 continue;   // nothing changes much before fight night
             }
             try {
-                $ctx   = FightContext::forEvent($this->db, $e);
-                $fight = $this->espn->fightDetails($ctx, EspnClient::candidateDays(
-                    $start ? new DateTimeImmutable('@' . $start) : null, new DateTimeImmutable('now')));
+                $ctx      = FightContext::forEvent($this->db, $e);
+                $previous = $e['espn_data'] ? json_decode((string) $e['espn_data'], true) : null;
+                $fight    = $this->espn->fightDetails($ctx, EspnClient::candidateDays(
+                    $start ? new DateTimeImmutable('@' . $start) : null, new DateTimeImmutable('now')), is_array($previous) ? $previous : null);
                 $save->execute([':d' => $fight ? self::json($fight) : null, ':id' => $e['id']]);
                 $done++;
                 $found += $fight ? 1 : 0;
@@ -181,6 +199,11 @@ final class EvidenceCollector
         $fight = $this->fight($mv, $ctx, $dropAt);
         if ($fight === null) {
             return ['status' => 'none', 'detail' => 'Fight not found on ESPN\'s scoreboard'];
+        }
+        // Kalshi closed the market, but ESPN hasn't marked the fight final yet → retried on the next scans.
+        if (($mv['movement_type'] ?? 'drop') === 'close' && $fight['state'] !== 'post' && !$fight['completed']) {
+            return ['status' => 'failed', 'error' => 'Kalshi closed the market but ESPN hasn\'t posted the result yet ('
+                . ($fight['detail'] ?: $fight['state']) . '); checking again next scan', 'raw' => $fight];
         }
 
         $lagMin = (int) round((time() - $dropAt->getTimestamp()) / 60);
@@ -546,7 +569,7 @@ final class EvidenceCollector
     private function movement(int $id): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT mm.id, mm.market_id, mm.dropped_side, mm.detected_at,
+            'SELECT mm.id, mm.market_id, mm.dropped_side, mm.detected_at, mm.movement_type,
                     ps.captured_at AS prev_at, cs.captured_at AS cur_at,
                     m.market_ticker, m.kalshi_market_id, m.market_title, m.yes_subtitle, m.no_subtitle, m.event_id,
                     e.event_title, e.event_start_time, e.espn_data
