@@ -215,7 +215,7 @@ function page_header(string $title, ?array $user = null, array $opts = []): void
     $flash = flash();
     $self  = $_SERVER['SCRIPT_NAME'] ?? '';
     $routes = [
-        'overview'  => ['/public/index.php', 'Overview', 'markets'],
+        'overview'  => ['/index.php', 'Overview', 'markets'],
         'watchlist' => ['/watchlist.php', 'Watchlist', 'star'],
         'history'   => ['/movements.php', 'Market history', 'movements'],
         'scans'     => ['/admin/scans.php', 'Scans', 'scans'],
@@ -256,7 +256,7 @@ function page_header(string $title, ?array $user = null, array $opts = []): void
 <?php if ($user): ?>
 <div class="shell">
     <aside class="sidebar">
-        <a class="brand" href="<?= e(url('/public/index.php')) ?>">
+        <a class="brand" href="<?= e(url('/index.php')) ?>">
             <span class="brand-mark">M</span>
             <span class="brand-text">Market Analyzer<small>UFC · Kalshi</small></span>
         </a>
