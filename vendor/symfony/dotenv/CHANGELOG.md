@@ -1,11 +1,6 @@
 CHANGELOG
 =========
 
-8.0
----
-
- * Remove `$defaultName` and `$defaultDescription` properties from `DebugCommand` command, configuration is done through the `#[AsCommand]` attribute
-
 7.1
 ---
 
