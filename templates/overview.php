@@ -191,7 +191,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                 <tr data-market-id="<?= $mid ?>" class="<?= $mid === $vm['selected'] ? 'is-selected' : '' ?>">
                     <td>
                         <a href="<?= e(url('/index.php', ['market' => $mid])) ?>" data-market-id="<?= $mid ?>"><?= e($d['yes_subtitle'] ?: $d['market_title']) ?></a>
-                        <span class="cell-sub"><?= e($d['event_title']) ?></span>
+                        <span class="cell-sub"><?= e($d['event_title']) ?> · <?= prediction_link($mid) ?></span>
                     </td>
                     <td class="num"><?= $cents($d['yes_after']) ?></td>
                     <td class="num col-no"><?= $cents($d['no_after']) ?></td>

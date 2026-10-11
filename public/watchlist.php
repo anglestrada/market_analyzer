@@ -119,7 +119,7 @@ page_header('Watchlist', $user);
             $chg = ($m['yes_price'] !== null && $m['yes_24h'] !== null) ? ((float) $m['yes_price'] - (float) $m['yes_24h']) * 100 : null; ?>
             <tr>
                 <td><a href="<?= e(url('/market.php', ['id' => $m['id']])) ?>"><?= e($m['yes_subtitle'] ?: $m['market_title']) ?></a>
-                    <div class="muted small"><?= e($m['event_title']) ?></div></td>
+                    <div class="muted small"><?= e($m['event_title']) ?> · <?= prediction_link((int) $m['id']) ?></div></td>
                 <td><?= badge($m['status']) ?></td>
                 <td><?= sparkline_svg(array_column($spark[$m['id']] ?? [], 'y')) ?></td>
                 <td data-value="<?= (float) $m['yes_price'] ?>"><b><?= fmt_price($m['yes_price']) ?></b><?= prob_bar($m['yes_price']) ?></td>

@@ -162,6 +162,41 @@
       });
     },
 
+    /** Fight prediction: Kalshi YES price (green) vs the model's win chance (blue), with a 50% line. */
+    prediction(canvas, d) {
+      const kalshi = d.kalshi || [];
+      const model = d.model || [];
+      if (!kalshi.length && !model.length) return false;
+      const xs = [...kalshi, ...model].map((p) => Date.parse(p.x));
+      const even = [{ x: Math.min(...xs), y: 50 }, { x: Math.max(...xs), y: 50 }];
+      const pct = (v) => (v == null ? '—' : `${(+v).toFixed(1)}%`);
+      return new Chart(canvas, {
+        type: 'line',
+        data: {
+          datasets: [
+            { label: 'Kalshi YES', data: kalshi, borderColor: C.yes, backgroundColor: gradient(C.yes, 0.18), fill: 'origin', tension: 0.2, spanGaps: true, order: 2 },
+            { label: 'Model', data: model, borderColor: C.sky, backgroundColor: C.sky, borderWidth: 2.5, stepped: true, spanGaps: true, order: 1,
+              pointRadius: (ctx) => (ctx.dataIndex === ctx.dataset.data.length - 1 ? 4 : 2), pointBackgroundColor: C.sky },
+            { label: '50%', data: even, borderColor: rgba(C.slate, 0.9), borderWidth: 1, borderDash: [4, 4], pointRadius: 0, fill: false, order: 3 },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          scales: { x: timeX(), y: { min: 0, max: 100, ticks: { callback: (v) => `${v}%`, stepSize: 25 } } },
+          plugins: {
+            legend: { display: false },
+            zoom: zoomOptions(),
+            tooltip: {
+              filter: (i) => i.dataset.label !== '50%',
+              callbacks: { label: (i) => ` ${i.dataset.label}: ${pct(i.parsed.y)}` },
+            },
+          },
+        },
+      });
+    },
+
     /** Market page: YES bid/ask band and last trade. */
     spread(canvas, d) {
       const s = d.series || [];
@@ -775,6 +810,7 @@
           <input type="hidden" name="return" value="${esc(location.pathname + location.search)}">
           <button class="btn-watch${d.watched ? ' on' : ''}" title="${d.watched ? 'Remove from' : 'Add to'} watchlist">${STAR}<span>${d.watched ? 'Watching' : 'Watch'}</span></button>
         </form>
+        <a class="pill pill-model" href="${esc(m.prediction_url)}" title="Fight prediction: model vs Kalshi">Prediction${d.model ? ` · ${d.model.p.toFixed(0)}%` : ''}</a>
         <a class="pill" href="${esc(m.url)}">Details</a>`;
 
       const label = main === 'yes' ? m.yes_label : m.no_label;

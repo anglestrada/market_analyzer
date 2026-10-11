@@ -1,0 +1,643 @@
+<?php
+declare(strict_types=1);
+
+final class SyncBudgetExceeded extends RuntimeException {}
+
+/**
+ * Fills fighters / fights / fight_participants / fight_stats from ESPN for every fighter on an open
+ * Kalshi market, plus what's needed about their past opponents.
+ *
+ *  1. linkMarkets()      Kalshi market "Will <fighter> win?" → ESPN athlete (market_fighters)
+ *  2. syncFighter(full)  the market's fighters: profile, every fight, method, duration, both fighters' stats
+ *  3. syncFighter(basic) their past opponents: profile, and only the fights since they met (date + result),
+ *                        enough to work out the opponent's record on the day:
+ *                        record then = current record − results from that fight onward.
+ *
+ * Past fights never change, so anything already stored is skipped; a run that hits its request budget
+ * stops cleanly and the next run carries on.
+ */
+final class FighterSync
+{
+    private const FULL_RESYNC_HOURS = 12;   // re-read a card fighter's eventlog this often (new fights)
+
+    private int $requests = 0;
+    private int $budget   = 0;
+    private array $cache  = [];
+    private int $fighters = 0;
+    private int $fights   = 0;
+
+    /** @var callable|null */
+    private $log;
+
+    public function __construct(
+        private PDO $db,
+        private EspnClient $espn,
+        ?callable $log = null,
+        private string $core = 'https://sports.core.api.espn.com/v2/sports/mma',
+        private string $search = 'https://site.web.api.espn.com/apis/search/v2',
+    ) {
+        $this->log = $log;
+    }
+
+    public static function make(?callable $log = null): self
+    {
+        return new self(db(), new EspnClient(), $log);
+    }
+
+    /**
+     * @param int[]|null $marketIds only these markets (default: every open UFC market)
+     * @return array{run_id:int, status:string, requests:int, fighters:int, fights:int, error:?string}
+     */
+    public function run(int $budget = 1500, ?array $marketIds = null, bool $relink = false): array
+    {
+        $this->budget = max(1, $budget);
+        $runId = (int) $this->db->query("INSERT INTO fighter_sync_runs (status) VALUES ('running') RETURNING id")->fetchColumn();
+        $status = 'completed';
+        $error  = null;
+
+        try {
+            $this->linkMarkets($marketIds, $relink);
+
+            // Fighters on the selected markets, both sides.
+            $rows = $this->marketRows($marketIds);
+            $ids  = [];
+            foreach ($rows as $r) {
+                $ids[(int) $r['fighter_id']] = true;
+                if ($r['opponent_id']) {
+                    $ids[(int) $r['opponent_id']] = true;
+                }
+            }
+            foreach (array_keys($ids) as $fighterId) {
+                $this->syncFighter($fighterId, 'full');
+            }
+            // Their past opponents: just enough history for the record on the day they met.
+            foreach (array_keys($ids) as $fighterId) {
+                $this->syncOpponentRecords($fighterId);
+            }
+        } catch (SyncBudgetExceeded) {
+            $status = 'partial';
+            $error  = "Stopped after {$this->requests} ESPN requests (budget); the next run continues.";
+        } catch (Throwable $e) {
+            $status = $this->fights > 0 ? 'partial' : 'failed';
+            $error  = $e->getMessage();
+            error_log('[fighter-sync] ' . $e);
+        }
+
+        $this->db->prepare(
+            'UPDATE fighter_sync_runs SET finished_at = NOW(), status = :s, fighters_synced = :f, fights_synced = :n,
+                    espn_requests = :r, error_message = :e WHERE id = :id'
+        )->execute([':s' => $status, ':f' => $this->fighters, ':n' => $this->fights, ':r' => $this->requests,
+                    ':e' => $error, ':id' => $runId]);
+        $this->say(sprintf('Fighter sync #%d %s: %d fighters, %d fights, %d ESPN requests%s',
+            $runId, $status, $this->fighters, $this->fights, $this->requests, $error ? " ($error)" : ''));
+
+        return ['run_id' => $runId, 'status' => $status, 'requests' => $this->requests,
+                'fighters' => $this->fighters, 'fights' => $this->fights, 'error' => $error];
+    }
+
+    /* ------------------------------------------------------------------ 1. market → ESPN athlete */
+
+    public function linkMarkets(?array $marketIds = null, bool $relink = false): void
+    {
+        $sql = "SELECT m.id, m.event_id, m.yes_subtitle, m.no_subtitle, m.market_title,
+                       e.event_title, e.espn_data, mf.market_id AS linked, mf.match_method, mf.opponent_id
+                  FROM markets m
+                  JOIN events e ON e.id = m.event_id
+             LEFT JOIN market_fighters mf ON mf.market_id = m.id
+                 WHERE e.sport = :sport";
+        $params = [':sport' => DEFAULT_SPORT];
+        if ($marketIds) {
+            $sql .= ' AND m.id IN (' . implode(',', array_map('intval', $marketIds)) . ')';
+        } else {
+            $sql .= " AND m.status = 'open'";
+        }
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+
+        foreach ($stmt->fetchAll() as $m) {
+            if ($m['match_method'] === 'manual' || ($m['linked'] && $m['opponent_id'] && !$relink)) {
+                continue;
+            }
+            $name = trim((string) $m['yes_subtitle']);
+            if ($name === '' || in_array(strtolower($name), ['yes', 'no'], true)) {
+                continue;
+            }
+            $ctx      = FightContext::forMovement($this->db, $m + ['dropped_side' => 'yes']);
+            $oppName  = $ctx->opponents[0] ?? (trim((string) $m['no_subtitle']) ?: null);
+            $fighter  = null;
+            $opponent = null;
+            $fightId  = null;
+
+            // Best source: the ESPN bout the scanner already found for this event (events.espn_data).
+            $espn = $m['espn_data'] ? json_decode((string) $m['espn_data'], true) : null;
+            if (is_array($espn) && !empty($espn['fighters'])) {
+                foreach ($espn['fighters'] as $f) {
+                    $aid = (string) ($f['athlete_id'] ?? '');
+                    if ($aid === '') {
+                        continue;
+                    }
+                    if ($ctx->whichFighter((string) $f['name']) === $ctx->subject) {
+                        $fighter = $this->ensureFighter($aid, (string) $f['name']);
+                    } else {
+                        $opponent = $this->ensureFighter($aid, (string) $f['name']);
+                    }
+                }
+                if (!empty($espn['comp_id']) && !empty($espn['event_id'])) {
+                    $fightId = $this->upsertUpcomingFight($espn);
+                }
+            }
+            // Otherwise ESPN's search, by name.
+            $fighter  ??= $this->searchFighter($name);
+            $opponent ??= $oppName ? $this->searchFighter($oppName) : null;
+            if ($fighter === null) {
+                $this->say("  ? no ESPN match for \"$name\" (market #{$m['id']})");
+                continue;
+            }
+
+            $this->db->prepare(
+                "INSERT INTO market_fighters (market_id, fighter_id, opponent_id, upcoming_fight_id, match_method)
+                 VALUES (:m, :f, :o, :u, 'auto')
+                 ON CONFLICT (market_id) DO UPDATE
+                    SET fighter_id = EXCLUDED.fighter_id, opponent_id = EXCLUDED.opponent_id,
+                        upcoming_fight_id = COALESCE(EXCLUDED.upcoming_fight_id, market_fighters.upcoming_fight_id),
+                        matched_at = NOW()
+                  WHERE market_fighters.match_method = 'auto'"
+            )->execute([':m' => $m['id'], ':f' => $fighter, ':o' => $opponent, ':u' => $fightId]);
+        }
+    }
+
+    private function searchFighter(string $name): ?int
+    {
+        $data = $this->get($this->search . '?' . http_build_query(['query' => $name, 'limit' => 10]), true);
+        foreach ($data['results'] ?? [] as $group) {
+            if (($group['type'] ?? '') !== 'player') {
+                continue;
+            }
+            foreach ($group['contents'] ?? [] as $c) {
+                $web = (string) ($c['link']['web'] ?? '');
+                if (($c['sport'] ?? '') === 'mma' && preg_match('#/mma/fighter/_/id/(\d+)#', $web, $mm)) {
+                    return $this->ensureFighter($mm[1], (string) ($c['displayName'] ?? $name));
+                }
+            }
+        }
+        return null;
+    }
+
+    private function upsertUpcomingFight(array $espn): ?int
+    {
+        $stmt = $this->db->prepare(
+            "INSERT INTO fights (espn_competition_id, espn_event_id, event_name, league, fight_date, weight_class,
+                                 is_title, title_type, scheduled_rounds, status_state)
+             VALUES (:c, :e, :n, 'ufc', :d, :w, CAST(:t AS BOOLEAN), :tt, :r, :s)
+             ON CONFLICT (espn_competition_id) DO UPDATE
+                SET fight_date = COALESCE(EXCLUDED.fight_date, fights.fight_date),
+                    weight_class = COALESCE(EXCLUDED.weight_class, fights.weight_class),
+                    status_state = CASE WHEN fights.status_state = 'post' THEN 'post' ELSE EXCLUDED.status_state END
+             RETURNING id"
+        );
+        [$isTitle, $titleType] = self::title((string) ($espn['weight_class'] ?? ''));
+        $stmt->execute([
+            ':c' => (string) $espn['comp_id'], ':e' => (string) $espn['event_id'], ':n' => $espn['event'] ?? null,
+            ':d' => $espn['start'] ?? null, ':w' => $espn['weight_class'] ?? null,
+            ':t' => $isTitle ? 1 : 0, ':tt' => $titleType,
+            ':r' => isset($espn['rounds']) ? (int) $espn['rounds'] : null,
+            ':s' => in_array($espn['state'] ?? '', ['pre', 'in', 'post'], true) ? $espn['state'] : 'pre',
+        ]);
+        return (int) $stmt->fetchColumn() ?: null;
+    }
+
+    /* ------------------------------------------------------------------ 2/3. fighter history */
+
+    /**
+     * @param string $level 'full'  = every fight with method, duration and both fighters' stats
+     *                      'basic' = profile + fights back to $since (date + result only)
+     */
+    public function syncFighter(int $fighterId, string $level = 'full', ?string $since = null): void
+    {
+        $f = $this->fighter($fighterId);
+        if (!$f) {
+            return;
+        }
+        $fresh = $f['history_synced_at'] && strtotime($f['history_synced_at']) > time() - self::FULL_RESYNC_HOURS * 3600;
+        if ($level === 'full' && $fresh) {
+            return;
+        }
+
+        $this->syncProfile($f);
+        $log   = $this->get($this->core . "/athletes/{$f['espn_athlete_id']}/eventlog?limit=200");
+        $items = $log['events']['items'] ?? $log['items'] ?? [];
+        $this->db->prepare('UPDATE fighters SET fights_listed = :n WHERE id = :id')->execute([':n' => count($items), ':id' => $fighterId]);
+
+        $sinceTs = $since ? strtotime($since) : null;
+        foreach ($items as $item) {
+            $compUrl = (string) ($item['competition']['$ref'] ?? '');
+            if (!preg_match('#/events/(\d+)/competitions/(\d+)#', $compUrl, $mm)) {
+                continue;
+            }
+            [, $eventId, $compId] = $mm;
+            $league = preg_match('#/leagues/([a-z0-9-]+)/#', $compUrl, $lm) ? $lm[1] : 'ufc';
+
+            $known = $this->knownFight($compId);
+            if ($known && ($known['detail_level'] === 'full' || $level === 'basic') && $known['status_state'] === 'post') {
+                if ($sinceTs !== null && $known['fight_date'] && strtotime($known['fight_date']) < $sinceTs) {
+                    break;   // eventlog is newest first: everything older is already covered
+                }
+                continue;
+            }
+            $date = $this->syncFight($compUrl, $eventId, $compId, $league, $level);
+            if ($sinceTs !== null && $date !== null && strtotime($date) < $sinceTs) {
+                break;
+            }
+        }
+
+        $this->computeRecordsBefore($fighterId);
+        if ($level === 'full') {
+            $this->db->prepare('UPDATE fighters SET history_synced_at = NOW() WHERE id = :id')->execute([':id' => $fighterId]);
+        }
+        $this->fighters++;
+    }
+
+    /** For each past opponent of this fighter whose record on the day is unknown, sync their fights since then. */
+    private function syncOpponentRecords(int $fighterId): void
+    {
+        $stmt = $this->db->prepare(
+            "SELECT o.fighter_id AS opp, MIN(f.fight_date) AS since
+               FROM fight_participants me
+               JOIN fight_participants o ON o.fight_id = me.fight_id AND o.fighter_id <> me.fighter_id
+               JOIN fights f ON f.id = me.fight_id
+              WHERE me.fighter_id = :id AND f.status_state = 'post' AND o.wins_before IS NULL
+              GROUP BY o.fighter_id"
+        );
+        $stmt->execute([':id' => $fighterId]);
+        foreach ($stmt->fetchAll() as $r) {
+            $this->syncFighter((int) $r['opp'], 'basic', $r['since']);
+        }
+    }
+
+    private function syncProfile(array $f): void
+    {
+        $p = $this->get($this->core . "/athletes/{$f['espn_athlete_id']}");
+        if (!$p) {
+            return;
+        }
+        [$w, $l, $d, $nc] = $this->currentRecord($p);
+        $this->db->prepare(
+            'UPDATE fighters SET full_name = :name, nickname = :nick, date_of_birth = :dob, height_in = :h, reach_in = :r,
+                    weight_lbs = :wt, stance = :st, association = :a, citizenship = :c, weight_class = :wc,
+                    styles = :styles, ranks = :ranks, wins = COALESCE(:w, wins), losses = COALESCE(:l, losses),
+                    draws = COALESCE(:d, draws), no_contests = COALESCE(:nc, no_contests),
+                    raw_profile = :raw, profile_synced_at = NOW()
+              WHERE id = :id'
+        )->execute([
+            ':name'   => $p['displayName'] ?? $p['fullName'] ?? $f['full_name'],
+            ':nick'   => $p['nickname'] ?? null,
+            ':dob'    => !empty($p['dateOfBirth']) ? substr((string) $p['dateOfBirth'], 0, 10) : null,
+            ':h'      => isset($p['height']) && is_numeric($p['height']) ? $p['height'] : null,
+            ':r'      => isset($p['reach']) && is_numeric($p['reach']) ? $p['reach'] : null,
+            ':wt'     => isset($p['weight']) && is_numeric($p['weight']) ? $p['weight'] : null,
+            ':st'     => is_array($p['stance'] ?? null) ? ($p['stance']['text'] ?? null) : ($p['stance'] ?? null),
+            ':a'      => is_array($p['association'] ?? null) ? ($p['association']['name'] ?? null) : ($p['association'] ?? null),
+            ':c'      => $p['citizenship'] ?? null,
+            ':wc'     => is_array($p['weightClass'] ?? null) ? ($p['weightClass']['text'] ?? null) : ($p['weightClass'] ?? null),
+            ':styles' => isset($p['styles']) ? self::json($p['styles']) : null,
+            ':ranks'  => isset($p['ranks']) ? self::json($p['ranks']) : null,
+            ':w' => $w, ':l' => $l, ':d' => $d, ':nc' => $nc,
+            ':raw'    => self::json(array_diff_key($p, ['links' => 1, 'images' => 1, 'headshot' => 1, 'flag' => 1])),
+            ':id'     => $f['id'],
+        ]);
+    }
+
+    /** @return array{0:?int,1:?int,2:?int,3:?int} current W, L, D, NC from the profile's "records" link */
+    private function currentRecord(array $profile): array
+    {
+        $node  = $this->ref($profile['records'] ?? $profile['record'] ?? null);
+        $items = $node['items'] ?? (isset($node['summary']) ? [$node] : []);
+        $best  = null;
+        foreach ($items as $it) {
+            $it = $this->ref($it) ?? [];
+            if (!isset($it['summary'])) {
+                continue;
+            }
+            $best ??= $it;
+            if (in_array(strtolower((string) ($it['type'] ?? $it['name'] ?? '')), ['total', 'overall'], true)) {
+                $best = $it;
+                break;
+            }
+        }
+        return $best ? self::parseRecord((string) $best['summary']) : [null, null, null, null];
+    }
+
+    /** "25-8-1" or "25-8-1 (1 NC)" → [25, 8, 1, 1] */
+    public static function parseRecord(string $s): array
+    {
+        if (!preg_match('/(\d+)\s*-\s*(\d+)(?:\s*-\s*(\d+))?/', $s, $m)) {
+            return [null, null, null, null];
+        }
+        $nc = preg_match('/(\d+)\s*NC/i', $s, $n) ? (int) $n[1] : 0;
+        return [(int) $m[1], (int) $m[2], (int) ($m[3] ?? 0), $nc];
+    }
+
+    /** One competition → fights + fight_participants (+ fight_stats when $level is full). @return ?string fight date */
+    private function syncFight(string $compUrl, string $eventId, string $compId, string $league, string $level): ?string
+    {
+        $comp = $this->get($compUrl);
+        if (!$comp) {
+            return null;
+        }
+        $date   = $comp['date'] ?? $comp['startDate'] ?? null;
+        $sides  = [];
+        foreach ($comp['competitors'] ?? [] as $c) {
+            $aid = (string) ($c['id'] ?? '');
+            if ($aid === '' && preg_match('#/athletes/(\d+)#', (string) ($c['athlete']['$ref'] ?? ''), $am)) {
+                $aid = $am[1];
+            }
+            if ($aid === '') {
+                continue;
+            }
+            $sides[] = ['aid' => $aid, 'node' => $c, 'winner' => $c['winner'] ?? null, 'order' => $c['order'] ?? null];
+        }
+        if (count($sides) !== 2) {
+            return $date;
+        }
+
+        // Status (method, round, clock) is needed for full detail, or when nobody won (draw / NC / not fought).
+        $status = null;
+        if ($level === 'full' || ($sides[0]['winner'] !== true && $sides[1]['winner'] !== true)) {
+            $status = $this->ref($comp['status'] ?? null) ?? [];
+        }
+        $state  = (string) ($status['type']['state'] ?? 'post');
+        $state  = in_array($state, ['pre', 'in', 'post'], true) ? $state : 'post';
+        $resultName = strtolower((string) ($status['result']['name'] ?? $status['result']['displayName'] ?? ''));
+
+        $rounds = preg_match('/(\d)\s*Rnd/i', (string) ($comp['description'] ?? ''), $rm) ? (int) $rm[1] : null;
+        $period = isset($status['period']) ? (int) $status['period'] : null;
+        $clock  = isset($status['clock']) && is_numeric($status['clock']) ? (int) round((float) $status['clock']) : null;
+        $clock  = $clock !== null ? max(0, min(300, $clock)) : null;
+        $duration = null;
+        if ($period !== null && $period > 0) {
+            $duration = ($period - 1) * 300 + ($clock ?? 300);
+        } elseif (str_contains($resultName, 'dec') && $rounds) {
+            $duration = $rounds * 300;
+        }
+        $weight = $comp['type']['text'] ?? $comp['type']['abbreviation'] ?? null;
+        [$isTitle, $titleType] = self::title((string) $weight);
+
+        $stmt = $this->db->prepare(
+            "INSERT INTO fights (espn_competition_id, espn_event_id, league, fight_date, weight_class, is_title, title_type,
+                                 scheduled_rounds, end_round, end_clock_seconds, duration_seconds, method, method_detail,
+                                 status_state, raw_competition, raw_status, detail_level)
+             VALUES (:c, :e, :lg, :d, :w, CAST(:t AS BOOLEAN), :tt, :r, :er, :ec, :dur, :m, :md, :s, :rc, :rs, :lvl)
+             ON CONFLICT (espn_competition_id) DO UPDATE
+                SET fight_date = EXCLUDED.fight_date, weight_class = EXCLUDED.weight_class, is_title = EXCLUDED.is_title,
+                    title_type = EXCLUDED.title_type, league = EXCLUDED.league,
+                    scheduled_rounds = COALESCE(EXCLUDED.scheduled_rounds, fights.scheduled_rounds),
+                    end_round = COALESCE(EXCLUDED.end_round, fights.end_round),
+                    end_clock_seconds = COALESCE(EXCLUDED.end_clock_seconds, fights.end_clock_seconds),
+                    duration_seconds = COALESCE(EXCLUDED.duration_seconds, fights.duration_seconds),
+                    method = COALESCE(EXCLUDED.method, fights.method),
+                    method_detail = COALESCE(EXCLUDED.method_detail, fights.method_detail),
+                    status_state = EXCLUDED.status_state,
+                    raw_status = COALESCE(EXCLUDED.raw_status, fights.raw_status),
+                    detail_level = CASE WHEN fights.detail_level = 'full' THEN 'full' ELSE EXCLUDED.detail_level END
+             RETURNING id"
+        );
+        $stmt->execute([
+            ':c' => $compId, ':e' => $eventId, ':lg' => $league, ':d' => $date, ':w' => $weight,
+            ':t' => $isTitle ? 1 : 0, ':tt' => $titleType, ':r' => $rounds,
+            ':er' => $period, ':ec' => $clock, ':dur' => $duration,
+            ':m'  => $status['result']['displayName'] ?? $status['result']['shortDisplayName'] ?? null,
+            ':md' => $status['result']['displayDescription'] ?? $status['result']['description'] ?? null,
+            ':s'  => $state,
+            ':rc' => self::json(array_diff_key($comp, ['competitors' => 1, 'venue' => 1])),
+            ':rs' => $status ? self::json($status) : null,
+            ':lvl' => $level === 'full' ? 'full' : 'basic',
+        ]);
+        $fightId = (int) $stmt->fetchColumn();
+        $this->fights++;
+
+        // Participants
+        $ids = [];
+        foreach ($sides as $s) {
+            $ids[$s['aid']] = $this->ensureFighter($s['aid'], null);
+        }
+        foreach ($sides as $i => $s) {
+            $other  = $sides[1 - $i];
+            $result = null;
+            if ($state === 'post') {
+                $result = match (true) {
+                    $s['winner'] === true                                         => 'W',
+                    $other['winner'] === true                                     => 'L',
+                    str_contains($resultName, 'draw')                             => 'D',
+                    str_contains($resultName, 'nc') || str_contains($resultName, 'no contest') => 'NC',
+                    default                                                       => null,
+                };
+            }
+            $this->db->prepare(
+                'INSERT INTO fight_participants (fight_id, fighter_id, opponent_id, espn_competitor_id, corner_order, result)
+                 VALUES (:f, :me, :o, :cid, :ord, :res)
+                 ON CONFLICT (fight_id, fighter_id) DO UPDATE
+                    SET opponent_id = EXCLUDED.opponent_id, result = COALESCE(EXCLUDED.result, fight_participants.result)'
+            )->execute([':f' => $fightId, ':me' => $ids[$s['aid']], ':o' => $ids[$other['aid']],
+                        ':cid' => $s['aid'], ':ord' => $s['order'], ':res' => $result]);
+
+            if ($level === 'full' && $state === 'post') {
+                $this->syncStats($fightId, $ids[$s['aid']], $s['node']);
+            }
+        }
+        return $date;
+    }
+
+    private function syncStats(int $fightId, int $fighterId, array $competitor): void
+    {
+        $stats = $this->ref($competitor['statistics'] ?? null);
+        if (!$stats) {
+            return;   // usually a non-UFC fight
+        }
+        $v = [];
+        $walk = function (array $node) use (&$walk, &$v): void {
+            if (isset($node['name']) && array_key_exists('value', $node) && !is_array($node['value'])) {
+                $v[(string) $node['name']] = $node;
+            }
+            foreach ($node as $child) {
+                if (is_array($child)) {
+                    $walk($child);
+                }
+            }
+        };
+        $walk($stats);
+        if (!$v) {
+            return;
+        }
+        $n   = fn(string $k) => isset($v[$k]) && is_numeric($v[$k]['value']) ? (int) round((float) $v[$k]['value']) : 0;
+        $sum = fn(string ...$keys) => array_sum(array_map($n, $keys));
+        $ctrl = 0;
+        if (isset($v['timeInControl'])) {
+            $dv = (string) ($v['timeInControl']['displayValue'] ?? '');
+            $ctrl = preg_match('/^(\d+):(\d{2})$/', $dv, $cm) ? (int) $cm[1] * 60 + (int) $cm[2] : $n('timeInControl');
+        }
+        $pos = fn(string $p, string $t) => $sum("sig{$p}HeadStrikes$t", "sig{$p}BodyStrikes$t", "sig{$p}LegStrikes$t");
+        $tgt = fn(string $t) => $sum("sigDistance{$t}StrikesLanded", "sigClinch{$t}StrikesLanded", "sigGround{$t}StrikesLanded");
+
+        $row = [
+            ':kd' => $n('knockDowns'), ':tl' => $n('totalStrikesLanded'), ':ta' => $n('totalStrikesAttempted'),
+            ':sl' => $n('sigStrikesLanded'), ':sa' => $n('sigStrikesAttempted'),
+            ':dl' => $pos('Distance', 'Landed'), ':da' => $pos('Distance', 'Attempted'),
+            ':cl' => $pos('Clinch', 'Landed'), ':ca' => $pos('Clinch', 'Attempted'),
+            ':gl' => $pos('Ground', 'Landed'), ':ga' => $pos('Ground', 'Attempted'),
+            ':hl' => $tgt('Head'), ':bl' => $tgt('Body'), ':ll' => $tgt('Leg'),
+            ':tdl' => $n('takedownsLanded'), ':tda' => $n('takedownsAttempted'),
+            ':sub' => $n('submissions'), ':rev' => $n('reversals'), ':ctrl' => $ctrl,
+        ];
+        // Keep the CHECKs happy if ESPN ever reports landed > attempted.
+        $row[':sa']  = max($row[':sa'], $row[':sl']);
+        $row[':tda'] = max($row[':tda'], $row[':tdl']);
+
+        $this->db->prepare(
+            'INSERT INTO fight_stats (fight_id, fighter_id, knockdowns, total_strikes_landed, total_strikes_attempted,
+                    sig_strikes_landed, sig_strikes_attempted, sig_distance_landed, sig_distance_attempted,
+                    sig_clinch_landed, sig_clinch_attempted, sig_ground_landed, sig_ground_attempted,
+                    sig_head_landed, sig_body_landed, sig_leg_landed, takedowns_landed, takedowns_attempted,
+                    submission_attempts, reversals, control_seconds, raw_stats)
+             VALUES (:f, :me, :kd, :tl, :ta, :sl, :sa, :dl, :da, :cl, :ca, :gl, :ga, :hl, :bl, :ll, :tdl, :tda, :sub, :rev, :ctrl, :raw)
+             ON CONFLICT (fight_id, fighter_id) DO UPDATE
+                SET knockdowns = EXCLUDED.knockdowns, total_strikes_landed = EXCLUDED.total_strikes_landed,
+                    total_strikes_attempted = EXCLUDED.total_strikes_attempted, sig_strikes_landed = EXCLUDED.sig_strikes_landed,
+                    sig_strikes_attempted = EXCLUDED.sig_strikes_attempted, sig_distance_landed = EXCLUDED.sig_distance_landed,
+                    sig_distance_attempted = EXCLUDED.sig_distance_attempted, sig_clinch_landed = EXCLUDED.sig_clinch_landed,
+                    sig_clinch_attempted = EXCLUDED.sig_clinch_attempted, sig_ground_landed = EXCLUDED.sig_ground_landed,
+                    sig_ground_attempted = EXCLUDED.sig_ground_attempted, sig_head_landed = EXCLUDED.sig_head_landed,
+                    sig_body_landed = EXCLUDED.sig_body_landed, sig_leg_landed = EXCLUDED.sig_leg_landed,
+                    takedowns_landed = EXCLUDED.takedowns_landed, takedowns_attempted = EXCLUDED.takedowns_attempted,
+                    submission_attempts = EXCLUDED.submission_attempts, reversals = EXCLUDED.reversals,
+                    control_seconds = EXCLUDED.control_seconds, raw_stats = EXCLUDED.raw_stats, synced_at = NOW()'
+        )->execute([':f' => $fightId, ':me' => $fighterId, ':raw' => self::json(array_map(fn($x) => $x['displayValue'] ?? $x['value'], $v))] + $row);
+    }
+
+    /**
+     * wins/losses/draws before each fight = current record − results of that fight and every later one.
+     * Needs this fighter's fights to be complete from the newest down to the fight; stops at the first gap.
+     */
+    public function computeRecordsBefore(int $fighterId): void
+    {
+        $f = $this->fighter($fighterId);
+        if (!$f || $f['profile_synced_at'] === null) {
+            return;
+        }
+        $stmt = $this->db->prepare(
+            "SELECT fp.id, fp.result FROM fight_participants fp JOIN fights fi ON fi.id = fp.fight_id
+              WHERE fp.fighter_id = :id AND fi.status_state = 'post' AND fi.fight_date IS NOT NULL
+              ORDER BY fi.fight_date DESC, fi.id DESC"
+        );
+        $stmt->execute([':id' => $fighterId]);
+        $w = (int) $f['wins']; $l = (int) $f['losses']; $d = (int) $f['draws'];
+        $upd = $this->db->prepare("UPDATE fight_participants SET wins_before = :w, losses_before = :l, draws_before = :d,
+                                          record_source = 'subtracted' WHERE id = :id");
+        foreach ($stmt->fetchAll() as $r) {
+            match ($r['result']) {
+                'W'  => $w--,
+                'L'  => $l--,
+                'D'  => $d--,
+                'NC' => null,
+                default => $w = -1,   // unknown result → can't go further back
+            };
+            if ($w < 0 || $l < 0 || $d < 0) {
+                break;
+            }
+            $upd->execute([':w' => $w, ':l' => $l, ':d' => $d, ':id' => $r['id']]);
+        }
+    }
+
+    /* ------------------------------------------------------------------ helpers */
+
+    private function marketRows(?array $marketIds): array
+    {
+        $sql = "SELECT mf.fighter_id, mf.opponent_id FROM market_fighters mf JOIN markets m ON m.id = mf.market_id";
+        $sql .= $marketIds ? ' WHERE m.id IN (' . implode(',', array_map('intval', $marketIds)) . ')' : " WHERE m.status = 'open'";
+        return $this->db->query($sql)->fetchAll();
+    }
+
+    private function fighter(int $id): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM fighters WHERE id = :id');
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    private function knownFight(string $compId): ?array
+    {
+        $stmt = $this->db->prepare('SELECT id, fight_date, status_state, detail_level FROM fights WHERE espn_competition_id = :c');
+        $stmt->execute([':c' => $compId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    private function ensureFighter(string $athleteId, ?string $name): int
+    {
+        $this->db->prepare(
+            'INSERT INTO fighters (espn_athlete_id, full_name) VALUES (:a, :n) ON CONFLICT (espn_athlete_id) DO NOTHING'
+        )->execute([':a' => $athleteId, ':n' => $name ?: "ESPN athlete $athleteId"]);
+        if ($name) {   // replace the placeholder name once a real one is known
+            $this->db->prepare("UPDATE fighters SET full_name = :n WHERE espn_athlete_id = :a AND full_name LIKE 'ESPN athlete %'")
+                ->execute([':a' => $athleteId, ':n' => $name]);
+        }
+        $stmt = $this->db->prepare('SELECT id FROM fighters WHERE espn_athlete_id = :a');
+        $stmt->execute([':a' => $athleteId]);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /** Follows an ESPN {"$ref": …} link; returns the node as-is if it's already expanded. */
+    private function ref(mixed $node): ?array
+    {
+        if (!is_array($node)) {
+            return null;
+        }
+        if (isset($node['$ref']) && count($node) <= 2) {
+            return $this->get((string) $node['$ref'], true);
+        }
+        return $node;
+    }
+
+    private function get(string $url, bool $quiet = false): ?array
+    {
+        $url = preg_replace('#^http://([a-z0-9.-]*espn\.com)#i', 'https://$1', $url);
+        if (array_key_exists($url, $this->cache)) {
+            return $this->cache[$url];
+        }
+        if ($this->requests >= $this->budget) {
+            throw new SyncBudgetExceeded();
+        }
+        $this->requests++;
+        usleep(150_000);   // polite: under ~7 requests a second
+        try {
+            return $this->cache[$url] = $this->espn->fetch($url);
+        } catch (HttpException $e) {
+            if (in_array($e->httpStatus, [403, 429], true)) {
+                throw $e;   // ESPN is refusing: stop the run
+            }
+            if (!$quiet) {
+                $this->say('  ! ' . $e->getMessage());
+            }
+            return $this->cache[$url] = null;
+        }
+    }
+
+    /** @return array{0:bool,1:?string} */
+    private static function title(string $typeText): array
+    {
+        if (!preg_match('/title/i', $typeText)) {
+            return [false, null];
+        }
+        return [true, preg_match('/interim/i', $typeText) ? 'interim' : 'undisputed'];
+    }
+
+    private function say(string $m): void
+    {
+        if ($this->log) {
+            ($this->log)($m);
+        }
+    }
+
+    private static function json(mixed $v): string
+    {
+        return json_encode($v, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+    }
+}

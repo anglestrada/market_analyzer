@@ -64,6 +64,12 @@ final class EspnClient
         return array_sum(array_intersect_key(Http::$counts, array_flip(['site.api.espn.com', 'sports.core.api.espn.com'])));
     }
 
+    /** Any ESPN URL (including "$ref" links, which ESPN gives as http://). Throws on failure. */
+    public function fetch(string $url, int $timeout = 10): array
+    {
+        return $this->get(preg_replace('#^http://([a-z0-9.-]*espn\.com)#i', 'https://$1', $url), $timeout);
+    }
+
     /** Every ESPN request goes through here so a rate limit stops the rest of the scan's ESPN calls. */
     private function get(string $url, int $timeout = 10): array
     {

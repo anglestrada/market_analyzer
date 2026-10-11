@@ -124,6 +124,47 @@ php bin/evidence.php 123 espn_news # one source for drop #123
 After pulling, run `schema.sql` again. It's safe to re-run: it adds `events.espn_data`, removes the old X/Reddit rows
 and table, and marks injury/withdrawal-type keywords as "bad for the fighter".
 
+## Fight prediction (personal model)
+
+The **Fight prediction** tab (`/prediction.php`) shows the model's chance for each fighter next to the Kalshi price.
+One fight's page has:
+- a chart with the Kalshi YES price in green and the model in blue
+- the breakdown of the score
+- a side-by-side fighter comparison
+- both fighters' resumes
+
+Every Kalshi market links to it: the Overview header and Latest drops table, the market page, the watchlist and the
+movements tables. It's research only, not betting advice.
+
+**Data (ESPN, no key).** `src/FighterSync.php` links each "Will X win?" market to an ESPN athlete. It stores every
+fight of both fighters (method, duration, title flag, both fighters' stats). For their past opponents it stores only
+the fights since they met, enough to work out the opponent's record **on the day**:
+current record − results from that fight onward. Past fights are never fetched twice.
+Each scan does a slice of this (`FIGHTER_SYNC_SCAN_BUDGET`, default 120 ESPN requests).
+`php bin/fighters_sync.php` does it all at once.
+
+**Model v1** (`src/FightModel.php`): `P = 1 / (1 + e^(−1.6·Δ))`, with
+`Δ = 0.35·Resume + 0.35·Performance + 0.20·Matchup + 0.10·Context`.
+- **Resume:** each win scores opponent quality (by record on the day) × experience × method × title × recency ×
+  league. Each loss costs `1 − opponent quality`.
+- **Performance:** the last 7 UFC fights with stats: strike differential, defense, knockdowns, takedowns, control,
+  submissions, durability. Each is a z-score.
+- **Matchup:** each fighter's offense against the other's defense, for striking and takedowns.
+- **Context:** age over 33, reach, a layoff over 18 months, a new division.
+
+The weights and spreads are starting values to refit once enough fights are stored. A prediction point is saved
+when the number moves 0.5 pp or more (at least every 6 h), and only once both fighters are fully synced.
+
+```bash
+php bin/fighters_sync.php                 # sync everything + predictions
+php bin/fighters_sync.php --market=123    # one market
+php bin/fighters_sync.php --predict-only  # recompute without ESPN requests
+php bin/espn_probe.php "Fighter Name"     # see what ESPN returns for a fighter
+```
+
+To fix a wrong match, update `market_fighters` (`fighter_id` / `opponent_id`) and set `match_method = 'manual'`.
+The sync job never overwrites manual rows.
+
 ## Notes
 
 - TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3

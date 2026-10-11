@@ -149,6 +149,7 @@ function icon(string $name, string $class = ''): string
         'logout'    => '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
         'search'    => '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
         'zoom'      => '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+        'target'    => '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/>',
         'news'      => '<path d="M4 4h13v16H6a2 2 0 0 1-2-2z"/><path d="M17 8h3v10a2 2 0 0 1-2 2"/><path d="M8 8h5M8 12h5M8 16h3"/>',
     ];
     return '<svg class="ic ' . e($class) . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
@@ -206,7 +207,7 @@ function kpi(string $label, string $valueHtml, string $subHtml = '', string $ton
 
 /**
  * Opens the app shell: sidebar navigation + content column.
- * $opts: 'nav' => overview|watchlist|history|scans|keywords|users (defaults from the script name),
+ * $opts: 'nav' => overview|prediction|watchlist|history|scans|keywords|users (defaults from the script name),
  *        'autorefresh' => seconds, 'wide' => bool
  */
 function page_header(string $title, ?array $user = null, array $opts = []): void
@@ -217,6 +218,7 @@ function page_header(string $title, ?array $user = null, array $opts = []): void
     $routes = [
         'overview'  => ['/index.php', 'Overview', 'markets'],
         'watchlist' => ['/watchlist.php', 'Watchlist', 'star'],
+        'prediction' => ['/prediction.php', 'Fight prediction', 'target'],
         'history'   => ['/movements.php', 'Market history', 'movements'],
         'scans'     => ['/admin/scans.php', 'Scans', 'scans'],
         'keywords'  => ['/admin/keywords.php', 'Keywords', 'keywords'],
@@ -262,6 +264,7 @@ function page_header(string $title, ?array $user = null, array $opts = []): void
         </a>
         <nav class="side-nav" aria-label="Main">
             <?= $link('overview') ?>
+            <?= $link('prediction') ?>
             <?= $link('watchlist') ?>
             <?= $link('history') ?>
             <?php if ($user['role'] === 'admin'): ?>
