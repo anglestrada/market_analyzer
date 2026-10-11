@@ -31,7 +31,7 @@ composer require phpseclib/phpseclib:~3.0   # adds the RSA-PSS library used for 
 psql -h localhost -U <user> -d <db> -f schema.sql
 php bin/create_user.php you@example.com admin
 php cron/scan.php                            # first scan; prints what it did
-php -S localhost:8000 -t public              # open http://localhost:3000
+php -S localhost:3000 -t public              # open http://localhost:3000 (APP_URL=http://localhost:3000)
 php cron/scan.php --loop                     # second terminal: scan every 5 minutes
 ```
 
