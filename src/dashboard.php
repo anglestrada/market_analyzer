@@ -159,6 +159,7 @@ function market_payload(int $id, string $range, int $userId): ?array
             'yes_label'   => $m['yes_subtitle'],
             'no_label'    => $m['no_subtitle'],
             'url'         => url('/market.php', ['id' => (int) $m['id']]),
+            'prediction_url' => url('/prediction.php', ['market' => (int) $m['id']]),
         ],
         'watched' => (bool) $m['watched'],
         'latest'  => $latest ? [
@@ -170,6 +171,7 @@ function market_payload(int $id, string $range, int $userId): ?array
         'moves'   => $moves,
         'analysis' => market_best_explanation($id),
         'fight'    => espn_fight_info($m['espn_data'] ?? null, $m['yes_subtitle']),
+        'model'    => latest_prediction($id),
     ];
 }
 
@@ -395,4 +397,17 @@ function movement_explanation(int $movementId): array
         $out['status'] = 'evidence_found';
     }
     return $out;
+}
+
+/** Latest saved model probability for a market (0–100), or null. */
+function latest_prediction(int $marketId): ?array
+{
+    try {
+        $q = db()->prepare('SELECT win_probability, created_at FROM predictions WHERE market_id = :m ORDER BY created_at DESC LIMIT 1');
+        $q->execute([':m' => $marketId]);
+        $r = $q->fetch();
+    } catch (PDOException) {
+        return null;   // fight-prediction tables not created yet
+    }
+    return $r ? ['p' => round((float) $r['win_probability'] * 100, 1), 'at' => iso($r['created_at'])] : null;
 }

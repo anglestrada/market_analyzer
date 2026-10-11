@@ -150,7 +150,7 @@ page_header($name, $user, ['nav' => $market['status'] === 'open' ? 'overview' : 
         </div>
         <?php if ($market['yes_subtitle']): ?><p class="muted small"><?= e($market['market_title']) ?></p><?php endif; ?>
     </div>
-    <?= watch_button($id, $watched, $self) ?>
+    <div class="sel-actions"><a class="pill" href="<?= e(url('/prediction.php', ['market' => $id])) ?>"><?= icon('target') ?> Fight prediction</a><?= watch_button($id, $watched, $self) ?></div>
 </div>
 
 <div class="grid grid-3">

@@ -356,4 +356,174 @@ INSERT INTO keywords (keyword, score, category, scope, polarity) VALUES
     ('missed weight',         7, 'weight',          'both', 'bad')
 ON CONFLICT ((LOWER(keyword))) DO NOTHING;
 
+-- =====================================================================
+-- Fight prediction: ESPN fighter data + model output
+-- (also works on its own: set_updated_at() is created at the top of this file)
+-- =====================================================================
+
+-- fighters (one row per ESPN athlete: the fighters on Kalshi cards and their past opponents)
+CREATE TABLE IF NOT EXISTS fighters (
+    id                  BIGSERIAL PRIMARY KEY,
+    espn_athlete_id     TEXT        NOT NULL UNIQUE,
+    full_name           TEXT        NOT NULL,
+    nickname            TEXT,
+    date_of_birth       DATE,
+    height_in           NUMERIC(5,1),
+    reach_in            NUMERIC(5,1),
+    weight_lbs          NUMERIC(5,1),
+    stance              TEXT,
+    association         TEXT,
+    citizenship         TEXT,
+    weight_class        TEXT,
+    styles              JSONB,                    -- ESPN "styles", if filled in
+    ranks               JSONB,                    -- ESPN "ranks" (current ranking)
+    wins                INTEGER     NOT NULL DEFAULT 0 CHECK (wins   >= 0),   -- current record
+    losses              INTEGER     NOT NULL DEFAULT 0 CHECK (losses >= 0),
+    draws               INTEGER     NOT NULL DEFAULT 0 CHECK (draws  >= 0),
+    no_contests         INTEGER     NOT NULL DEFAULT 0 CHECK (no_contests >= 0),
+    fights_listed       INTEGER,                  -- fights in ESPN's eventlog (vs W+L+D+NC = completeness check)
+    raw_profile         JSONB,
+    profile_synced_at   TIMESTAMPTZ,
+    history_synced_at   TIMESTAMPTZ,              -- last time the full eventlog was read
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS fighters_name_lower_idx ON fighters (LOWER(full_name));
+CREATE OR REPLACE TRIGGER fighters_updated_at BEFORE UPDATE ON fighters
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- fights (one row per ESPN competition = one bout)
+CREATE TABLE IF NOT EXISTS fights (
+    id                   BIGSERIAL PRIMARY KEY,
+    espn_competition_id  TEXT        NOT NULL UNIQUE,
+    espn_event_id        TEXT        NOT NULL,
+    event_name           TEXT,
+    league               TEXT        NOT NULL DEFAULT 'ufc',     -- 'ufc' or the other promotion's slug
+    fight_date           TIMESTAMPTZ,
+    weight_class         TEXT,                                    -- ESPN type.text, e.g. "Bantamweight"
+    is_title             BOOLEAN     NOT NULL DEFAULT FALSE,      -- type.text contains "Title"
+    title_type           TEXT        CHECK (title_type IN ('undisputed', 'interim')),
+    scheduled_rounds     SMALLINT    CHECK (scheduled_rounds BETWEEN 1 AND 5),   -- from "3 Rnd (5-5-5)"
+    end_round            SMALLINT    CHECK (end_round BETWEEN 0 AND 5),
+    end_clock_seconds    INTEGER     CHECK (end_clock_seconds BETWEEN 0 AND 300),
+    duration_seconds     INTEGER     CHECK (duration_seconds >= 0),   -- (end_round − 1) × 300 + end clock
+    method               TEXT,                                    -- "KO/TKO", "Submission", "Decision - Split"
+    method_detail        TEXT,                                    -- "Punches", "Rear Naked Choke"
+    status_state         TEXT        NOT NULL DEFAULT 'post' CHECK (status_state IN ('pre', 'in', 'post')),
+    raw_competition      JSONB,
+    raw_status           JSONB,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (is_title OR title_type IS NULL)
+);
+CREATE INDEX IF NOT EXISTS fights_date_idx  ON fights (fight_date DESC);
+CREATE INDEX IF NOT EXISTS fights_event_idx ON fights (espn_event_id);
+CREATE OR REPLACE TRIGGER fights_updated_at BEFORE UPDATE ON fights
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- detail_level: 'basic' = date + result only (an opponent's other fights), 'full' = method, duration and stats checked
+ALTER TABLE fights ADD COLUMN IF NOT EXISTS detail_level TEXT NOT NULL DEFAULT 'basic';
+DO $$ BEGIN
+    ALTER TABLE fights ADD CONSTRAINT fights_detail_level_chk CHECK (detail_level IN ('basic', 'full'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- fight_participants (two rows per fight: result + each fighter's record going in)
+CREATE TABLE IF NOT EXISTS fight_participants (
+    id                   BIGSERIAL PRIMARY KEY,
+    fight_id             BIGINT      NOT NULL REFERENCES fights (id)   ON DELETE CASCADE,
+    fighter_id           BIGINT      NOT NULL REFERENCES fighters (id) ON DELETE CASCADE,
+    opponent_id          BIGINT               REFERENCES fighters (id) ON DELETE SET NULL,
+    espn_competitor_id   TEXT,
+    corner_order         SMALLINT,
+    result               TEXT        CHECK (result IN ('W', 'L', 'D', 'NC')),   -- NULL = not fought yet
+    -- record on the day of the fight, before it (current record − results from this fight onward)
+    wins_before          INTEGER     CHECK (wins_before   >= 0),
+    losses_before        INTEGER     CHECK (losses_before >= 0),
+    draws_before         INTEGER     CHECK (draws_before  >= 0),
+    record_source        TEXT        CHECK (record_source IN ('subtracted', 'rebuilt')),
+    UNIQUE (fight_id, fighter_id)
+);
+CREATE INDEX IF NOT EXISTS participants_fighter_idx  ON fight_participants (fighter_id);
+CREATE INDEX IF NOT EXISTS participants_opponent_idx ON fight_participants (opponent_id);
+
+-- fight_stats (ESPN per-fighter totals for one fight; missing for most non-UFC fights)
+-- Defense (strikes absorbed, takedown defense) = the opponent's row for the same fight.
+CREATE TABLE IF NOT EXISTS fight_stats (
+    id                       BIGSERIAL PRIMARY KEY,
+    fight_id                 BIGINT   NOT NULL REFERENCES fights (id)   ON DELETE CASCADE,
+    fighter_id               BIGINT   NOT NULL REFERENCES fighters (id) ON DELETE CASCADE,
+    knockdowns               INTEGER  NOT NULL DEFAULT 0,
+    total_strikes_landed     INTEGER  NOT NULL DEFAULT 0,
+    total_strikes_attempted  INTEGER  NOT NULL DEFAULT 0,
+    sig_strikes_landed       INTEGER  NOT NULL DEFAULT 0,
+    sig_strikes_attempted    INTEGER  NOT NULL DEFAULT 0,
+    sig_distance_landed      INTEGER  NOT NULL DEFAULT 0,   -- by position (head + body + leg)
+    sig_distance_attempted   INTEGER  NOT NULL DEFAULT 0,
+    sig_clinch_landed        INTEGER  NOT NULL DEFAULT 0,
+    sig_clinch_attempted     INTEGER  NOT NULL DEFAULT 0,
+    sig_ground_landed        INTEGER  NOT NULL DEFAULT 0,
+    sig_ground_attempted     INTEGER  NOT NULL DEFAULT 0,
+    sig_head_landed          INTEGER  NOT NULL DEFAULT 0,   -- by target (distance + clinch + ground)
+    sig_body_landed          INTEGER  NOT NULL DEFAULT 0,
+    sig_leg_landed           INTEGER  NOT NULL DEFAULT 0,
+    takedowns_landed         INTEGER  NOT NULL DEFAULT 0,
+    takedowns_attempted      INTEGER  NOT NULL DEFAULT 0,
+    submission_attempts      INTEGER  NOT NULL DEFAULT 0,   -- ESPN "submissions"
+    reversals                INTEGER  NOT NULL DEFAULT 0,
+    control_seconds          INTEGER  NOT NULL DEFAULT 0,   -- ESPN "timeInControl" (m:ss → seconds)
+    raw_stats                JSONB,
+    synced_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (fight_id, fighter_id),
+    CHECK (sig_strikes_landed <= sig_strikes_attempted OR sig_strikes_attempted = 0),
+    CHECK (takedowns_landed   <= takedowns_attempted   OR takedowns_attempted   = 0)
+);
+CREATE INDEX IF NOT EXISTS fight_stats_fighter_idx ON fight_stats (fighter_id);
+
+-- market_fighters (which ESPN fighter each Kalshi market is about: "Will <fighter> win?")
+-- match_method = 'manual' rows are never overwritten by the sync job (use it to fix a wrong match).
+CREATE TABLE IF NOT EXISTS market_fighters (
+    market_id            BIGINT      PRIMARY KEY REFERENCES markets (id) ON DELETE CASCADE,
+    fighter_id           BIGINT      NOT NULL REFERENCES fighters (id) ON DELETE CASCADE,
+    opponent_id          BIGINT               REFERENCES fighters (id) ON DELETE SET NULL,
+    upcoming_fight_id    BIGINT               REFERENCES fights (id)   ON DELETE SET NULL,   -- ESPN's scheduled bout
+    match_method         TEXT        NOT NULL DEFAULT 'auto' CHECK (match_method IN ('auto', 'manual')),
+    matched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS market_fighters_fighter_idx ON market_fighters (fighter_id);
+
+-- fighter_sync_runs (each ESPN fighter-data job; like scan_runs)
+CREATE TABLE IF NOT EXISTS fighter_sync_runs (
+    id                BIGSERIAL PRIMARY KEY,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at       TIMESTAMPTZ,
+    status            TEXT        NOT NULL DEFAULT 'running'
+                      CHECK (status IN ('running', 'completed', 'partial', 'failed')),
+    fighters_synced   INTEGER     NOT NULL DEFAULT 0,
+    fights_synced     INTEGER     NOT NULL DEFAULT 0,
+    espn_requests     INTEGER     NOT NULL DEFAULT 0,
+    error_message     TEXT
+);
+CREATE INDEX IF NOT EXISTS fighter_sync_started_idx ON fighter_sync_runs (started_at DESC);
+
+-- predictions (model output over time, drawn against the Kalshi price on the same chart)
+-- One row per market per change; the probability is for the market's fighter (YES).
+-- The four *_score columns are "this fighter minus the opponent".
+CREATE TABLE IF NOT EXISTS predictions (
+    id                 BIGSERIAL PRIMARY KEY,
+    market_id          BIGINT        NOT NULL REFERENCES markets (id)  ON DELETE CASCADE,
+    fighter_id         BIGINT        NOT NULL REFERENCES fighters (id) ON DELETE CASCADE,
+    opponent_id        BIGINT        NOT NULL REFERENCES fighters (id) ON DELETE CASCADE,
+    sync_run_id        BIGINT                 REFERENCES fighter_sync_runs (id) ON DELETE SET NULL,
+    model_version      TEXT          NOT NULL DEFAULT 'v1',
+    win_probability    NUMERIC(6,4)  NOT NULL CHECK (win_probability BETWEEN 0 AND 1),
+    kalshi_yes_price   NUMERIC(6,4)  CHECK (kalshi_yes_price BETWEEN 0 AND 1),   -- market price at the same moment
+    resume_score       NUMERIC(8,4),
+    performance_score  NUMERIC(8,4),
+    matchup_score      NUMERIC(8,4),
+    context_score      NUMERIC(8,4),
+    delta              NUMERIC(8,4),                                -- combined Δ before the logistic
+    components         JSONB         NOT NULL DEFAULT '{}'::jsonb,  -- per-stat details, style labels, notes
+    created_at         TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS predictions_market_time_idx ON predictions (market_id, created_at DESC);
+
 COMMIT;

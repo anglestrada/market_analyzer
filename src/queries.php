@@ -121,7 +121,7 @@ function render_movements_table(array $rows, bool $showMarket = true): void
                 <?php if ($showMarket): ?>
                     <td data-value="<?= e(strtolower((string) $r['market_title'])) ?>">
                         <a href="<?= e(url('/market.php', ['id' => $r['market_id']])) ?>"><?= e($r['yes_subtitle'] ?: $r['market_title']) ?></a>
-                        <div class="muted small"><?= e($r['event_title']) ?></div>
+                        <div class="muted small"><?= e($r['event_title']) ?> · <?= prediction_link((int) $r['market_id']) ?></div>
                     </td>
                 <?php endif; ?>
                 <td data-value="<?= e($side) ?>">
@@ -158,6 +158,13 @@ function render_movements_table(array $rows, bool $showMarket = true): void
     </table>
     </div>
     <?php
+}
+
+/** Small "Prediction" link for a Kalshi market (shown wherever a market appears). */
+function prediction_link(int $marketId, string $label = 'Prediction'): string
+{
+    return '<a class="pred-link" href="' . e(url('/prediction.php', ['market' => $marketId])) . '" title="Fight prediction: model vs Kalshi">'
+        . icon('target') . '<span>' . e($label) . '</span></a>';
 }
 
 function watch_button(int $marketId, bool $watched, string $returnTo, bool $compact = false): string

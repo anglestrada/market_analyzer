@@ -151,6 +151,18 @@ final class Scanner
         // Retry earlier news failures (handoff: "retried on the next scheduled scan").
         $this->retryFailedNews($errors);
         $this->evidence?->retryFailed(fn(string $m) => $this->say($m));
+
+        // Fight prediction: a small slice of ESPN fighter data per scan, then refresh predictions (database only).
+        // Never fails the scan; `php bin/fighters_sync.php` does a full sync in one go.
+        if (ESPN_ENABLED && FIGHTER_SYNC_SCAN_BUDGET > 0) {
+            try {
+                $sync = (new FighterSync($this->db, new EspnClient(), fn(string $m) => $this->say($m)))->run(FIGHTER_SYNC_SCAN_BUDGET);
+                (new FightModel($this->db))->predictAll($sync['run_id'], fn(string $m) => $this->say($m));
+            } catch (Throwable $e) {
+                $this->say('Fight prediction update failed: ' . $e->getMessage());
+                error_log('[fight-prediction] ' . $e);
+            }
+        }
         if ($n = array_sum(array_intersect_key(Http::$counts, array_flip(['site.api.espn.com', 'sports.core.api.espn.com'])))) {
             $this->say("ESPN requests this scan: $n");
         }

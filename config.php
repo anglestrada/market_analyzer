@@ -102,6 +102,9 @@ define('LIVE_LOOKBACK_MINUTES', max(5, (int) env('LIVE_LOOKBACK_MINUTES', '20'))
 define('ESPN_ENABLED', env('ESPN_ENABLED', '1') === '1');            // unofficial ESPN JSON; fails quietly if it changes
 define('KALSHI_TRADES_ENABLED', env('KALSHI_TRADES_ENABLED', '1') === '1');
 
+// Fight prediction: ESPN fighter data synced a little at a time by every scan (the CLI can do more at once).
+define('FIGHTER_SYNC_SCAN_BUDGET', max(0, (int) env('FIGHTER_SYNC_SCAN_BUDGET', '120')));   // ESPN requests per scan; 0 = off
+
 // Scanner / analysis rules
 define('DEFAULT_SPORT', 'UFC');
 define('MOVEMENT_THRESHOLD_PP', 5.0);   // ≥ 5 percentage-point drop
@@ -401,4 +404,6 @@ require_once __DIR__ . '/src/FightContext.php';
 require_once __DIR__ . '/src/LiveSignals.php';
 require_once __DIR__ . '/src/EspnClient.php';
 require_once __DIR__ . '/src/EvidenceCollector.php';
+require_once __DIR__ . '/src/FighterSync.php';
+require_once __DIR__ . '/src/FightModel.php';
 require_once __DIR__ . '/src/Scanner.php';

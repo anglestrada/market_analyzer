@@ -489,3 +489,35 @@ form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
     .search-box input { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---------- fight prediction ---------- */
+.model-text { color: #8fb4d6; }
+.pill-model { border-color: rgba(143, 180, 214, .45); color: #8fb4d6; }
+.pred-link { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: #8fb4d6; white-space: nowrap; }
+.pred-link .ic { width: 12px; height: 12px; }
+.pred-link:hover { color: var(--text); text-decoration: none; }
+.pred-hero { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s4); }
+.pred-side { display: flex; flex-direction: column; gap: 4px; }
+.pred-label { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.pred-big { font-size: 34px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.pred-big .delta { font-size: 30px; }
+.legend-row { display: flex; gap: var(--s4); font-size: 12px; color: var(--muted); margin-bottom: var(--s2); }
+.swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.swatch-kalshi { background: #7ccba6; }
+.swatch-model { background: #8fb4d6; height: 4px; }
+.swatch-even { background: repeating-linear-gradient(90deg, #6f7873 0 4px, transparent 4px 8px); }
+.delta-bar { position: relative; height: 4px; margin-top: 6px; background: var(--surface-3); border-radius: 2px; }
+.delta-bar::after { content: ""; position: absolute; left: 50%; top: -2px; width: 1px; height: 8px; background: var(--border-strong); }
+.delta-bar span { position: absolute; top: 0; height: 4px; border-radius: 2px; }
+.delta-bar .pos { left: 50%; background: #8fb4d6; }
+.delta-bar .neg { right: 50%; background: var(--down); }
+.pred-stats { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px var(--s4); font-size: 13px; }
+.pred-stats li { display: flex; justify-content: space-between; gap: var(--s2); border-bottom: 1px solid var(--border); padding: 3px 0; }
+.fight-cmp td.num, .fight-cmp th.num { text-align: right; }
+.resume-table td.num, .resume-table th.num { text-align: right; }
+.res { display: inline-block; min-width: 22px; text-align: center; font-size: 11px; font-weight: 700; border-radius: 4px; padding: 0 4px; }
+.res-w { background: var(--accent-soft); color: var(--accent); }
+.res-l { background: var(--down-soft); color: var(--down); }
+.res-d, .res-nc { background: var(--surface-3); color: var(--text-2); }
+.src-title { background: var(--warn-soft); color: var(--warn); }
+@media (max-width: 760px) { .pred-hero { grid-template-columns: 1fr; } .pred-stats { grid-template-columns: 1fr; } }
