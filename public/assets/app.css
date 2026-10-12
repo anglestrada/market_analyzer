@@ -503,8 +503,8 @@ form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
 .pred-big .delta { font-size: 30px; }
 .legend-row { display: flex; gap: var(--s4); font-size: 12px; color: var(--muted); margin-bottom: var(--s2); }
 .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-.swatch-kalshi { background: #7ccba6; }
-.swatch-model { background: #8fb4d6; height: 4px; }
+.swatch-kalshi { background: var(--c, #7ccba6); }
+.swatch-model { background: var(--c, #8fb4d6); height: 4px; box-shadow: 0 0 0 1px var(--c, #8fb4d6); }
 .swatch-even { background: repeating-linear-gradient(90deg, #6f7873 0 4px, transparent 4px 8px); }
 .delta-bar { position: relative; height: 4px; margin-top: 6px; background: var(--surface-3); border-radius: 2px; }
 .delta-bar::after { content: ""; position: absolute; left: 50%; top: -2px; width: 1px; height: 8px; background: var(--border-strong); }
@@ -521,3 +521,19 @@ form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
 .res-d, .res-nc { background: var(--surface-3); color: var(--text-2); }
 .src-title { background: var(--warn-soft); color: var(--warn); }
 @media (max-width: 760px) { .pred-hero { grid-template-columns: 1fr; } .pred-stats { grid-template-columns: 1fr; } }
+
+/* one fight, two fighters: A = green Kalshi / blue model, B = sand Kalshi / violet model */
+.kalshi-a { color: #7ccba6; } .model-a { color: #8fb4d6; }
+.kalshi-b { color: #d9b382; } .model-b { color: #b4a7d6; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+.dot-a { background: #7ccba6; } .dot-b { background: #d9b382; }
+.pred-hero-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); }
+.pred-fighter h2 { font-size: 16px; margin: 0 0 var(--s3); }
+.pred-fighter + .pred-fighter { border-left: 1px solid var(--border); padding-left: var(--s5); }
+.pred-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s3); }
+.pred-nums > div { display: flex; flex-direction: column; gap: 2px; }
+.pred-nums .pred-big { font-size: 28px; }
+.legend-row { flex-wrap: wrap; }
+.fights-table tr.fight-a td { border-bottom-color: transparent; }
+.fights-table tr.fight-b td { padding-top: 0; }
+@media (max-width: 760px) { .pred-hero-2 { grid-template-columns: 1fr; } .pred-fighter + .pred-fighter { border-left: 0; padding-left: 0; } }

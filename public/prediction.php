@@ -1,14 +1,16 @@
 <?php
 /**
- * Fight prediction.
- *   /prediction.php             every open market: model vs Kalshi
- *   /prediction.php?market=ID   one fight: chart (model vs Kalshi over time), breakdown, fighter comparison, resume
+ * Fight prediction: one entry per fight (a Kalshi event holds one "Will X win?" market per fighter).
+ *   /prediction.php              every open fight: both fighters' model and Kalshi chances
+ *   /prediction.php?event=ID     one fight: chart with both fighters (model + Kalshi), breakdown, comparison, resumes
+ *   /prediction.php?market=ID    same page, opened from a market (that fighter is shown first)
  */
 declare(strict_types=1);
 require_once __DIR__ . '/../config.php';
 
 $user     = require_login();
 $marketId = (int) ($_GET['market'] ?? 0);
+$eventId  = (int) ($_GET['event'] ?? 0);
 $model    = new FightModel(db());
 $pct      = fn(?float $p, int $d = 0) => $p === null ? '—' : number_format($p * 100, $d) . '%';
 $gapHtml  = function (?float $model, ?float $kalshi): string {
@@ -17,24 +19,55 @@ $gapHtml  = function (?float $model, ?float $kalshi): string {
     }
     return fmt_pp(($model - $kalshi) * 100);
 };
+if ($marketId > 0 && $eventId <= 0) {
+    $q = db()->prepare('SELECT event_id FROM markets WHERE id = :id');
+    $q->execute([':id' => $marketId]);
+    $eventId = (int) $q->fetchColumn();
+    if ($eventId <= 0) {
+        http_response_code(404);
+        page_header('Not found', $user, ['nav' => 'prediction']);
+        echo '<div class="empty card">' . icon('search') . '<p>Market not found.</p></div>';
+        page_footer();
+        exit;
+    }
+}
 
 /* =====================================================================
- * List of open markets
+ * List of open fights
  * ================================================================== */
-if ($marketId <= 0) {
+if ($eventId <= 0) {
     $rows = db()->query(
-        "SELECT m.id, m.yes_subtitle, m.market_title, e.event_title, e.event_start_time, mf.fighter_id,
-                o.full_name AS opponent,
+        "SELECT m.id, m.event_id, m.yes_subtitle, m.market_title, e.event_title, e.event_start_time, mf.fighter_id,
                 (SELECT yes_price FROM market_snapshots s WHERE s.market_id = m.id ORDER BY captured_at DESC LIMIT 1) AS kalshi,
                 (SELECT win_probability FROM predictions p WHERE p.market_id = m.id ORDER BY created_at DESC LIMIT 1) AS model,
                 (SELECT created_at FROM predictions p WHERE p.market_id = m.id ORDER BY created_at DESC LIMIT 1) AS model_at
            FROM markets m
            JOIN events e ON e.id = m.event_id
       LEFT JOIN market_fighters mf ON mf.market_id = m.id
-      LEFT JOIN fighters o ON o.id = mf.opponent_id
           WHERE e.sport = 'UFC' AND m.status = 'open'
-       ORDER BY e.event_start_time ASC NULLS LAST, e.id, m.yes_subtitle"
+       ORDER BY e.event_start_time ASC NULLS LAST, e.id, m.id"
     )->fetchAll();
+
+    // Group the per-fighter markets into fights.
+    $fights = [];
+    foreach ($rows as $r) {
+        $fights[(int) $r['event_id']] ??= ['event' => $r, 'sides' => []];
+        $fights[(int) $r['event_id']]['sides'][] = $r;
+    }
+    foreach ($fights as &$f) {
+        $s0 = $f['sides'][0];
+        $s1 = $f['sides'][1] ?? null;
+        $f['a'] = $s0['yes_subtitle'] ?: $s0['market_title'];
+        $f['b'] = $s1 ? ($s1['yes_subtitle'] ?: $s1['market_title']) : null;
+        $f['ka'] = $s0['kalshi'] !== null ? (float) $s0['kalshi'] : null;
+        $f['kb'] = $s1 && $s1['kalshi'] !== null ? (float) $s1['kalshi'] : ($f['ka'] !== null ? 1 - $f['ka'] : null);
+        // The model is one number per fight: take whichever side has one, the other side is 1 − p.
+        $f['ma'] = $s0['model'] !== null ? (float) $s0['model'] : ($s1 && $s1['model'] !== null ? 1 - (float) $s1['model'] : null);
+        $f['mb'] = $f['ma'] !== null ? 1 - $f['ma'] : null;
+        $f['at'] = max((string) $s0['model_at'], (string) ($s1['model_at'] ?? '')) ?: null;
+        $f['linked'] = (bool) ($s0['fighter_id'] || ($s1['fighter_id'] ?? null));
+    }
+    unset($f);
 
     page_header('Fight prediction', $user, ['nav' => 'prediction']);
     ?>
@@ -45,27 +78,32 @@ if ($marketId <= 0) {
             <p class="page-sub">The model's chance for each fighter next to the Kalshi price. Research only, not betting advice.</p>
         </div>
     </div>
-    <?php if (!$rows): ?>
+    <?php if (!$fights): ?>
         <div class="empty card"><?= icon('target') ?><p>No open UFC markets yet. Run a scan first.</p></div>
     <?php else: ?>
     <section class="card">
         <div class="table-wrap">
-        <table class="table sortable">
-            <thead><tr><th>Fighter</th><th>Fight</th><th class="num">Model</th><th class="num">Kalshi</th><th class="num">Gap</th><th>Updated</th><th data-nosort></th></tr></thead>
+        <table class="table fights-table">
+            <thead><tr><th>Fight</th><th>Fighter</th><th class="num">Model</th><th class="num">Kalshi</th><th class="num">Gap</th><th>Updated</th></tr></thead>
             <tbody>
-            <?php foreach ($rows as $r):
-                $mp = $r['model'] !== null ? (float) $r['model'] : null;
-                $kp = $r['kalshi'] !== null ? (float) $r['kalshi'] : null; ?>
-                <tr>
-                    <td><a href="<?= e(url('/prediction.php', ['market' => $r['id']])) ?>"><b><?= e($r['yes_subtitle'] ?: $r['market_title']) ?></b></a>
-                        <?php if ($r['opponent']): ?><span class="cell-sub">vs <?= e($r['opponent']) ?></span><?php endif; ?></td>
-                    <td><?= e($r['event_title']) ?><span class="cell-sub"><?= $r['event_start_time'] ? e(fmt_time($r['event_start_time'], 'M j, g:i A')) : '' ?></span></td>
-                    <td class="num" data-value="<?= $mp ?? -1 ?>"><b class="model-text"><?= $pct($mp) ?></b></td>
-                    <td class="num" data-value="<?= $kp ?? -1 ?>"><b class="yes-text"><?= $pct($kp) ?></b></td>
-                    <td class="num" data-value="<?= $mp !== null && $kp !== null ? $mp - $kp : 0 ?>"><?= $gapHtml($mp, $kp) ?></td>
-                    <td class="small"><?= $r['model_at'] ? reltime($r['model_at']) : '<span class="muted">' . ($r['fighter_id'] ? 'syncing' : 'not matched') . '</span>' ?></td>
-                    <td class="nowrap"><a class="pill" href="<?= e(url('/market.php', ['id' => $r['id']])) ?>">Market</a></td>
+            <?php foreach ($fights as $id => $f): $href = url('/prediction.php', ['event' => $id]); ?>
+                <tr class="fight-a">
+                    <td rowspan="<?= $f['b'] ? 2 : 1 ?>"><a href="<?= e($href) ?>"><b><?= e($f['a']) ?><?= $f['b'] ? ' vs ' . e($f['b']) : '' ?></b></a>
+                        <span class="cell-sub"><?= e($f['event']['event_title']) ?><?= $f['event']['event_start_time'] ? ' · ' . e(fmt_time($f['event']['event_start_time'], 'M j, g:i A')) : '' ?></span></td>
+                    <td><span class="dot dot-a"></span><?= e($f['a']) ?></td>
+                    <td class="num" data-value="<?= $f['ma'] ?? -1 ?>"><b class="model-a"><?= $pct($f['ma']) ?></b></td>
+                    <td class="num" data-value="<?= $f['ka'] ?? -1 ?>"><b class="kalshi-a"><?= $pct($f['ka']) ?></b></td>
+                    <td class="num"><?= $gapHtml($f['ma'], $f['ka']) ?></td>
+                    <td rowspan="<?= $f['b'] ? 2 : 1 ?>" class="small"><?= $f['at'] ? reltime($f['at']) : '<span class="muted">' . ($f['linked'] ? 'syncing' : 'not matched') . '</span>' ?></td>
                 </tr>
+                <?php if ($f['b']): ?>
+                <tr class="fight-b">
+                    <td><span class="dot dot-b"></span><?= e($f['b']) ?></td>
+                    <td class="num"><b class="model-b"><?= $pct($f['mb']) ?></b></td>
+                    <td class="num"><b class="kalshi-b"><?= $pct($f['kb']) ?></b></td>
+                    <td class="num"><?= $gapHtml($f['mb'], $f['kb']) ?></td>
+                </tr>
+                <?php endif; ?>
             <?php endforeach; ?>
             </tbody>
         </table>
@@ -78,141 +116,196 @@ if ($marketId <= 0) {
 }
 
 /* =====================================================================
- * One market
+ * One fight
  * ================================================================== */
-$stmt = db()->prepare('SELECT m.*, e.event_title, e.event_start_time FROM markets m JOIN events e ON e.id = m.event_id WHERE m.id = :id');
-$stmt->execute([':id' => $marketId]);
-$market = $stmt->fetch();
-if (!$market) {
+$stmt = db()->prepare(
+    'SELECT m.*, e.event_title, e.event_start_time FROM markets m JOIN events e ON e.id = m.event_id
+      WHERE m.event_id = :e ORDER BY m.id'
+);
+$stmt->execute([':e' => $eventId]);
+$markets = $stmt->fetchAll();
+if (!$markets) {
     http_response_code(404);
     page_header('Not found', $user, ['nav' => 'prediction']);
-    echo '<div class="empty card">' . icon('search') . '<p>Market not found.</p></div>';
+    echo '<div class="empty card">' . icon('search') . '<p>Fight not found.</p></div>';
     page_footer();
     exit;
 }
 
-$res  = $model->predictMarket($marketId);
-$name = $market['yes_subtitle'] ?: $market['market_title'];
+// Fighter A = the market the page was opened from (or the first one the model can score); fighter B = the other.
+$results = [];
+foreach ($markets as $m) {
+    $results[(int) $m['id']] = $model->predictMarket((int) $m['id']);
+}
+$primary = null;
+foreach ($markets as $m) {
+    if ((int) $m['id'] === $marketId) {
+        $primary = $m;
+    }
+}
+if ($primary === null) {
+    foreach ($markets as $m) {
+        if ($primary === null && $results[(int) $m['id']]['ok']) {
+            $primary = $m;
+        }
+    }
+}
+$primary ??= $markets[0];
+$aId = (int) $primary['id'];
+$secondary = null;
+foreach ($markets as $m) {
+    if ($secondary === null && (int) $m['id'] !== $aId) {
+        $secondary = $m;
+    }
+}
+$bId = $secondary ? (int) $secondary['id'] : null;
 
-// Latest Kalshi price
-$q = db()->prepare('SELECT yes_price, captured_at FROM market_snapshots WHERE market_id = :m ORDER BY captured_at DESC LIMIT 1');
-$q->execute([':m' => $marketId]);
-$snap   = $q->fetch() ?: null;
-$kalshi = $snap && $snap['yes_price'] !== null ? (float) $snap['yes_price'] : null;
-$p      = $res['ok'] ? (float) $res['p'] : null;
+$res   = $results[$aId];
+$nameA = $primary['yes_subtitle'] ?: $primary['market_title'];
+$nameB = $secondary ? ($secondary['yes_subtitle'] ?: $secondary['market_title']) : ($res['b']['name'] ?? ($primary['no_subtitle'] ?: 'Opponent'));
+$p     = $res['ok'] ? (float) $res['p'] : null;          // model chance for A; B = 1 − p
 
-/* ---------- chart: Kalshi YES (from snapshots) and the model (from saved predictions) ---------- */
+$latest = function (?int $id): ?array {
+    if ($id === null) {
+        return null;
+    }
+    $q = db()->prepare('SELECT yes_price, captured_at FROM market_snapshots WHERE market_id = :m ORDER BY captured_at DESC LIMIT 1');
+    $q->execute([':m' => $id]);
+    $r = $q->fetch();
+    return $r && $r['yes_price'] !== null ? ['p' => (float) $r['yes_price'], 'at' => $r['captured_at']] : null;
+};
+$snapA = $latest($aId);
+$snapB = $latest($bId);
+$kA = $snapA['p'] ?? null;
+$kB = $snapB['p'] ?? ($kA !== null ? 1 - $kA : null);   // only one market on Kalshi → its NO side
+
+/* ---------- chart: both fighters, Kalshi (snapshots) and model (saved predictions) ---------- */
 $ranges = ['24h' => '-24 hours', '7d' => '-7 days', '30d' => '-30 days', 'all' => null];
 $range  = array_key_exists($_GET['range'] ?? '', $ranges) ? $_GET['range'] : '7d';
 $now    = new DateTimeImmutable('now', new DateTimeZone('UTC'));
 $from   = $ranges[$range] ? $now->modify($ranges[$range]) : new DateTimeImmutable('2000-01-01', new DateTimeZone('UTC'));
 
-$q = db()->prepare('SELECT captured_at, yes_price FROM market_snapshots
-                     WHERE market_id = :m AND captured_at >= :from AND yes_price IS NOT NULL ORDER BY captured_at');
-$q->execute([':m' => $marketId, ':from' => $from->format('c')]);
-$snaps  = $q->fetchAll();
-$every  = max(1, (int) ceil(count($snaps) / 600));   // ≤ ~600 points
-$kSeries = [];
-foreach ($snaps as $i => $s) {
-    if ($i % $every === 0 || $i === count($snaps) - 1) {
-        $kSeries[] = ['x' => iso($s['captured_at']), 'y' => round((float) $s['yes_price'] * 100, 2)];
+$kalshiSeries = function (int $id) use ($from): array {
+    $q = db()->prepare('SELECT captured_at, yes_price FROM market_snapshots
+                         WHERE market_id = :m AND captured_at >= :from AND yes_price IS NOT NULL ORDER BY captured_at');
+    $q->execute([':m' => $id, ':from' => $from->format('c')]);
+    $rows  = $q->fetchAll();
+    $every = max(1, (int) ceil(count($rows) / 600));   // ≤ ~600 points per line
+    $out   = [];
+    foreach ($rows as $i => $r) {
+        if ($i % $every === 0 || $i === count($rows) - 1) {
+            $out[] = ['x' => iso($r['captured_at']), 'y' => round((float) $r['yes_price'] * 100, 2)];
+        }
     }
-}
-$q = db()->prepare('SELECT created_at, win_probability FROM predictions
-                     WHERE market_id = :m AND model_version = :v AND created_at >= :from ORDER BY created_at');
-$q->execute([':m' => $marketId, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
-$mSeries = array_map(fn($r) => ['x' => iso($r['created_at']), 'y' => round((float) $r['win_probability'] * 100, 2)], $q->fetchAll());
-// Start the model line at the edge of the range with the value it had then.
-$q = db()->prepare('SELECT win_probability FROM predictions WHERE market_id = :m AND model_version = :v AND created_at < :from
-                     ORDER BY created_at DESC LIMIT 1');
-$q->execute([':m' => $marketId, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
-if (($before = $q->fetchColumn()) !== false && $before !== null) {
-    $start = $kSeries[0]['x'] ?? iso($from->format('c'));
-    array_unshift($mSeries, ['x' => $start, 'y' => round((float) $before * 100, 2)]);
-}
-// The model only stores a point when it changes; carry the latest value to now (or show the live value).
-if ($p !== null) {
-    $mSeries[] = ['x' => iso($now->format('c')), 'y' => round($p * 100, 2)];
-}
+    return $out;
+};
+$modelSeries = function (int $id, ?float $live, ?string $startX) use ($from, $now): array {
+    $q = db()->prepare('SELECT created_at, win_probability FROM predictions
+                         WHERE market_id = :m AND model_version = :v AND created_at >= :from ORDER BY created_at');
+    $q->execute([':m' => $id, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
+    $out = array_map(fn($r) => ['x' => iso($r['created_at']), 'y' => round((float) $r['win_probability'] * 100, 2)], $q->fetchAll());
+    // Start at the edge of the range with the value the model had then.
+    $q = db()->prepare('SELECT win_probability FROM predictions WHERE market_id = :m AND model_version = :v AND created_at < :from
+                         ORDER BY created_at DESC LIMIT 1');
+    $q->execute([':m' => $id, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
+    if (($before = $q->fetchColumn()) !== false && $before !== null) {
+        array_unshift($out, ['x' => $startX ?? iso($from->format('c')), 'y' => round((float) $before * 100, 2)]);
+    }
+    // Points are only saved when the number moves; carry the live value to now.
+    if ($live !== null) {
+        $out[] = ['x' => iso($now->format('c')), 'y' => round($live * 100, 2)];
+    }
+    return $out;
+};
+$flip = fn(array $series) => array_map(fn($pt) => ['x' => $pt['x'], 'y' => round(100 - $pt['y'], 2)], $series);
 
-$opponentName = $res['b']['name'] ?? ($market['no_subtitle'] ?: 'Opponent');
-$chart = [
-    'kalshi' => $kSeries,
-    'model'  => $mSeries,
-    'label'  => $name,
+$kSeriesA = $kalshiSeries($aId);
+$kSeriesB = $bId !== null ? $kalshiSeries($bId) : $flip($kSeriesA);
+$mSeriesA = $modelSeries($aId, $p, $kSeriesA[0]['x'] ?? null);
+$mSeriesB = $flip($mSeriesA);   // the model's two chances always add up to 100%
+
+// Fighter A: green Kalshi / blue model. Fighter B: sand Kalshi / violet model. Kalshi = solid line, model = stepped + dots.
+$lines = [
+    ['label' => "$nameA · Kalshi", 'kind' => 'kalshi', 'color' => '#7ccba6', 'data' => $kSeriesA],
+    ['label' => "$nameA · Model",  'kind' => 'model',  'color' => '#8fb4d6', 'data' => $mSeriesA],
+    ['label' => "$nameB · Kalshi", 'kind' => 'kalshi', 'color' => '#d9b382', 'data' => $kSeriesB],
+    ['label' => "$nameB · Model",  'kind' => 'model',  'color' => '#b4a7d6', 'data' => $mSeriesB],
 ];
+$hasChart = (bool) array_filter($lines, fn($l) => $l['data']);
 
-log_activity('market_view', null, $marketId, ['source' => 'prediction', 'range' => $range]);
-page_header('Prediction · ' . $name, $user, ['nav' => 'prediction']);
+log_activity('market_view', null, $aId, ['source' => 'prediction', 'range' => $range]);
+page_header('Prediction · ' . $nameA . ' vs ' . $nameB, $user, ['nav' => 'prediction']);
 
 $reasonText = [
-    'not_linked'  => ['Not matched to ESPN yet', "This Kalshi market hasn't been matched to an ESPN fighter. Matching runs with every scan; run <code>php bin/fighters_sync.php --market=$marketId</code> to do it now."],
-    'no_opponent' => ['Opponent not matched', "The opponent couldn't be found on ESPN. Run <code>php bin/fighters_sync.php --market=$marketId --relink</code>, or set <code>market_fighters.opponent_id</code> by hand (and <code>match_method = 'manual'</code>)."],
-    'not_synced'  => ['Fighter data still syncing', "ESPN fighter data fills in a little every scan. Run <code>php bin/fighters_sync.php --market=$marketId</code> to finish it now."],
+    'not_linked'  => ['Not matched to ESPN yet', "This fight's Kalshi markets haven't been matched to ESPN fighters. Matching runs with every scan; run <code>php bin/fighters_sync.php --market=$aId</code> to do it now."],
+    'no_opponent' => ['Opponent not matched', "The opponent couldn't be found on ESPN. Run <code>php bin/fighters_sync.php --market=$aId --relink</code>, or set <code>market_fighters.opponent_id</code> by hand (and <code>match_method = 'manual'</code>)."],
+    'not_synced'  => ['Fighter data still syncing', "ESPN fighter data fills in a little every scan. Run <code>php bin/fighters_sync.php --market=$aId</code> to finish it now."],
     'no_history'  => ['No fight history on ESPN', 'One of the fighters has no completed fights on ESPN, so the model has nothing to score.'],
 ];
+$side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?array $snap) use ($pct, $gapHtml): string {
+    ob_start(); ?>
+    <div class="pred-fighter pred-<?= $cls ?>">
+        <h2><span class="dot dot-<?= $cls ?>"></span><?= e($name) ?></h2>
+        <div class="pred-nums">
+            <div><span class="pred-label">Model</span><b class="pred-big model-<?= $cls ?>"><?= $pct($model, 1) ?></b></div>
+            <div><span class="pred-label">Kalshi</span><b class="pred-big kalshi-<?= $cls ?>"><?= $pct($kalshi, 1) ?></b>
+                <span class="muted small"><?= $snap ? 'price ' . reltime($snap['at']) : '' ?></span></div>
+            <div><span class="pred-label">Gap</span><b class="pred-big"><?= $gapHtml($model, $kalshi) ?></b></div>
+        </div>
+    </div>
+    <?php return (string) ob_get_clean();
+};
 ?>
-<nav class="crumbs"><a href="<?= e(url('/prediction.php')) ?>">Fight prediction</a><span>›</span><?= e($market['event_title']) ?></nav>
+<nav class="crumbs"><a href="<?= e(url('/prediction.php')) ?>">Fight prediction</a><span>›</span><?= e($primary['event_title']) ?></nav>
 
 <div class="page-head">
     <div>
         <p class="eyebrow">Personal model · <?= e(FightModel::VERSION) ?></p>
-        <h1><?= e($name) ?> <span class="muted">vs</span> <?= e($opponentName) ?></h1>
+        <h1><?= e($nameA) ?> <span class="muted">vs</span> <?= e($nameB) ?></h1>
         <div class="meta">
-            <?= badge($market['status']) ?>
-            <?php if ($market['event_start_time']): ?><span class="muted"><?= e(fmt_time($market['event_start_time'], 'D, M j · g:i A')) ?></span><?php endif; ?>
+            <?= badge($primary['status']) ?>
+            <?php if ($primary['event_start_time']): ?><span class="muted"><?= e(fmt_time($primary['event_start_time'], 'D, M j · g:i A')) ?></span><?php endif; ?>
         </div>
     </div>
     <div class="sel-actions">
-        <a class="pill" href="<?= e(url('/market.php', ['id' => $marketId])) ?>">Market details</a>
-        <a class="pill" href="<?= e(url('/index.php', ['market' => $marketId])) ?>">Overview</a>
+        <a class="pill" href="<?= e(url('/market.php', ['id' => $aId])) ?>"><?= e($nameA) ?> market</a>
+        <?php if ($bId): ?><a class="pill" href="<?= e(url('/market.php', ['id' => $bId])) ?>"><?= e($nameB) ?> market</a><?php endif; ?>
+        <a class="pill" href="<?= e(url('/index.php', ['market' => $aId])) ?>">Overview</a>
     </div>
 </div>
 
 <?php if (!$res['ok']): [$t, $txt] = $reasonText[$res['reason']] ?? ['Prediction unavailable', e($res['reason'])]; ?>
     <section class="card"><div class="news-status"><b><?= e($t) ?></b><p><?= $txt ?></p></div></section>
-<?php else: $a = $res['a']; $b = $res['b']; ?>
-
-<section class="pred-hero card">
-    <div class="pred-side">
-        <span class="pred-label">Model · <?= e($a['name']) ?></span>
-        <b class="pred-big model-text"><?= $pct($p, 1) ?></b>
-        <span class="muted small"><?= e($b['name']) ?> <?= $pct(1 - $p, 1) ?></span>
-    </div>
-    <div class="pred-side">
-        <span class="pred-label">Kalshi · YES</span>
-        <b class="pred-big yes-text"><?= $pct($kalshi, 1) ?></b>
-        <span class="muted small"><?= $snap ? 'price ' . reltime($snap['captured_at']) : 'no snapshot yet' ?></span>
-    </div>
-    <div class="pred-side">
-        <span class="pred-label">Gap (model − Kalshi)</span>
-        <b class="pred-big"><?= $gapHtml($p, $kalshi) ?></b>
-        <span class="muted small"><?= $p !== null && $kalshi !== null ? ($p > $kalshi ? 'model likes ' . e($a['name']) . ' more' : ($p < $kalshi ? 'Kalshi likes ' . e($a['name']) . ' more' : 'they agree')) : '' ?></span>
-    </div>
-</section>
-
 <?php endif; ?>
+
+<section class="pred-hero-2 card">
+    <?= $side($nameA, 'a', $p, $kA, $snapA) ?>
+    <?= $side($nameB, 'b', $p !== null ? 1 - $p : null, $kB, $snapB ?? null) ?>
+</section>
 
 <section class="card">
     <div class="card-head wrap">
-        <h2>Win chance over time · <?= e($name) ?></h2>
+        <h2>Win chance over time</h2>
         <div class="range">
             <?php foreach (array_keys($ranges) as $key): ?>
-                <a class="pill<?= $range === $key ? ' active' : '' ?>" href="<?= e(url('/prediction.php', ['market' => $marketId, 'range' => $key])) ?>"><?= e($key) ?></a>
+                <a class="pill<?= $range === $key ? ' active' : '' ?>" href="<?= e(url('/prediction.php', ['event' => $eventId, 'market' => $aId, 'range' => $key])) ?>"><?= e($key) ?></a>
             <?php endforeach; ?>
         </div>
     </div>
     <div class="legend-row">
-        <span><i class="swatch swatch-kalshi"></i>Kalshi YES price</span>
-        <span><i class="swatch swatch-model"></i>Model</span>
+        <?php foreach ($lines as $l): ?>
+            <span><i class="swatch swatch-<?= e($l['kind']) ?>" style="--c:<?= e($l['color']) ?>"></i><?= e($l['label']) ?></span>
+        <?php endforeach; ?>
         <span><i class="swatch swatch-even"></i>50%</span>
     </div>
     <div class="chart-box h-320"><canvas data-chart="prediction" data-source="d-pred" data-empty="No price or prediction history in this period yet."></canvas></div>
-    <?= json_script('d-pred', ($kSeries || $mSeries) ? $chart : null) ?>
-    <p class="hint">The model saves a point whenever its number moves by 0.5 pp or more (and at least every 6 hours).</p>
+    <?= json_script('d-pred', $hasChart ? ['lines' => $lines] : null) ?>
+    <p class="hint">Solid lines are Kalshi's YES price for each fighter; stepped lines are the model. The model saves a point whenever its number moves by 0.5 pp or more (and at least every 6 hours).</p>
 </section>
 
 <?php if ($res['ok']):
+    $a = $res['a'];
+    $b = $res['b'];
     $parts = $res['parts'];
     $labels = ['resume' => 'Resume (who they beat, how, how recently)', 'performance' => 'Performance (fight stats)',
                'matchup' => 'Style matchup (offense vs. the other\'s defense)', 'context' => 'Context (age, reach, layoff, division)'];
@@ -253,8 +346,9 @@ $reasonText = [
         $fmtNum = fn($v, $d = 2) => $v === null ? '—' : number_format((float) $v, $d);
         $rowsCmp = [
             'Record'                  => [$a['record'], $b['record']],
+            'Fights on ESPN (UFC / other)' => ["{$a['ufc_fights']} / {$a['other_fights']}", "{$b['ufc_fights']} / {$b['other_fights']}"],
             'Age'                     => [$a['age'] ?? '—', $b['age'] ?? '—'],
-            'Reach'                   => [$a['reach_in'] ? $a['reach_in'] . '"' : '—', $b['reach_in'] ? $b['reach_in'] . '"' : '—'],
+            'Reach'                   => [$a['reach_in'] ? rtrim(rtrim(number_format($a['reach_in'], 1), '0'), '.') . '"' : '—', $b['reach_in'] ? rtrim(rtrim(number_format($b['reach_in'], 1), '0'), '.') . '"' : '—'],
             'Stance'                  => [$a['stance'] ?? '—', $b['stance'] ?? '—'],
             'Style (from stats)'      => [$a['style'] ?? '—', $b['style'] ?? '—'],
             'Resume score'            => [$fmtNum($a['resume']), $fmtNum($b['resume'])],
@@ -265,7 +359,7 @@ $reasonText = [
             'Control time'            => [$fmtPct($a['perf']['ctrl'] ?? null), $fmtPct($b['perf']['ctrl'] ?? null)],
             'Knockdowns / 15 min'     => [$fmtNum($a['perf']['kd15'] ?? null), $fmtNum($b['perf']['kd15'] ?? null)],
             'Sub attempts / 15 min'   => [$fmtNum($a['perf']['sub15'] ?? null), $fmtNum($b['perf']['sub15'] ?? null)],
-            'Fights with stats used'  => [$a['perf_fights'], $b['perf_fights']],
+            'Fights with stats used'  => [$a['perf_fights'] . ' of ' . $a['fights_with_stats'], $b['perf_fights'] . ' of ' . $b['fights_with_stats']],
             'Months since last fight' => [$a['layoff_months'] ?? '—', $b['layoff_months'] ?? '—'],
         ];
         ?>
