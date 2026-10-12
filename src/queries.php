@@ -53,7 +53,7 @@ function fetch_movements(array $f = [], int $limit = 50): array
         $params[':side'] = $f['side'];
     }
 
-    $sql = 'SELECT mm.*, m.market_title, m.yes_subtitle, m.no_subtitle, m.status AS market_status,
+    $sql = 'SELECT mm.*, m.event_id, m.market_title, m.yes_subtitle, m.no_subtitle, m.status AS market_status,
                    e.event_title,
                    ma.explanation_status, ma.relevance_score, ma.matched_keywords,
                    a.title AS article_title, a.url AS article_url, a.source_name, a.published_at AS article_published_at,

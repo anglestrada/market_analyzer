@@ -86,25 +86,47 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
     <aside class="market-watch" aria-label="Open markets">
         <div class="mw-head">
             <h2>Market watch</h2>
-            <span class="count" title="Open markets"><?= count($markets) ?></span>
+            <span class="count" title="Open fights"><?= count(array_unique(array_column($markets, 'event_id'))) ?></span>
         </div>
         <label class="mw-search">
             <?= icon('search') ?>
             <input type="search" placeholder="Filter fighters" aria-label="Filter markets" data-filter=".mw-item" data-empty="#mw-none">
         </label>
-        <p class="mw-hint">Change = YES since the previous scan</p>
+        <p class="mw-hint">Change = first fighter's price since the previous scan</p>
         <div class="mw-list" role="list">
-            <?php $lastEvent = null; foreach ($markets as $m): ?>
-                <?php if ($m['event'] !== $lastEvent): $lastEvent = $m['event']; ?>
-                    <div class="mw-group"><?= e($m['event']) ?></div>
+            <?php
+            // One row per fight: Kalshi's two "Will X win?" markets are merged (fighter A = the fight's first market).
+            $fights = [];
+            foreach ($markets as $m) {
+                $fights[$m['event_id']]['event'] = $m['event'];
+                $fights[$m['event_id']]['sides'][$m['id']] = $m;
+            }
+            $selectedEvent = null;
+            foreach ($fights as $eid => $f) {
+                ksort($fights[$eid]['sides']);
+                if (isset($f['sides'][$vm['selected']])) {
+                    $selectedEvent = $eid;
+                }
+            }
+            $lastEvent = null;
+            foreach ($fights as $eid => $f):
+                $sides = array_values($f['sides']);
+                $a = $sides[0];
+                $b = $sides[1] ?? null;
+                $last = fn(array $x) => fighter_last_name($x['name']) ?: $x['name'];
+                $nameB = $b ? $last($b) : fighter_last_name($a['no_label'] ?? null);
+                $on = $eid === $selectedEvent;
+            ?>
+                <?php if ($f['event'] !== $lastEvent): $lastEvent = $f['event']; ?>
+                    <div class="mw-group"><?= e($f['event']) ?></div>
                 <?php endif; ?>
-                <a class="mw-item<?= $m['id'] === $vm['selected'] ? ' is-selected' : '' ?>" role="listitem"
-                   href="<?= e(url('/index.php', ['market' => $m['id']])) ?>" data-market-id="<?= $m['id'] ?>"
-                   data-search="<?= e(strtolower($m['name'] . ' ' . $m['title'] . ' ' . $m['event'])) ?>"
-                   <?= $m['id'] === $vm['selected'] ? 'aria-current="true"' : '' ?>>
-                    <span class="mw-name"><?= e($m['name']) ?><?php if ($m['watched']): ?> <span title="On your watchlist"><?= icon('star', 'mw-star') ?></span><?php endif; ?></span>
-                    <?= fmt_pp($m['change']) ?>
-                    <span class="mw-prices num">YES <?= $cents($m['yes']) ?> · NO <?= $cents($m['no']) ?></span>
+                <a class="mw-item<?= $on ? ' is-selected' : '' ?>" role="listitem"
+                   href="<?= e(url('/index.php', ['market' => $a['id']])) ?>" data-market-id="<?= $a['id'] ?>" data-event-id="<?= (int) $eid ?>"
+                   data-search="<?= e(strtolower(implode(' ', array_map(fn($x) => $x['name'] . ' ' . $x['title'], $sides)) . ' ' . $f['event'])) ?>"
+                   <?= $on ? 'aria-current="true"' : '' ?>>
+                    <span class="mw-name"><?= e($last($a)) ?><?= $nameB ? ' vs ' . e($nameB) : '' ?><?php if (array_filter(array_column($sides, 'watched'))): ?> <span title="On your watchlist"><?= icon('star', 'mw-star') ?></span><?php endif; ?></span>
+                    <?= fmt_pp($a['change']) ?>
+                    <span class="mw-prices num"><span class="kalshi-a"><?= e($last($a)) ?> <?= $cents($a['yes']) ?></span> · <span class="kalshi-b"><?= e($nameB ?? 'NO') ?> <?= $cents($b ? $b['yes'] : $a['no']) ?></span></span>
                 </a>
             <?php endforeach; ?>
             <?php if (!$markets): ?><p class="mw-empty">No open markets. Showing a closed market.</p><?php endif; ?>
@@ -115,7 +137,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
     <div class="selected" data-el="selected" aria-live="polite">
         <div class="sel-head">
             <div class="sel-title">
-                <p class="eyebrow" data-el="eyebrow">Selected market</p>
+                <p class="eyebrow" data-el="eyebrow">Selected fight</p>
                 <h2 data-el="name"><span class="skeleton w-40"></span></h2>
                 <p class="sel-event" data-el="event"></p>
             </div>
@@ -129,7 +151,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
                 <p class="price-change" data-el="change"></p>
             </div>
             <div class="sel-controls">
-                <div class="seg" role="group" aria-label="Side" data-el="sides">
+                <div class="seg" role="group" aria-label="Fighter" data-el="sides">
                     <button type="button" data-side="yes" aria-pressed="true">YES</button>
                     <button type="button" data-side="no" aria-pressed="false">NO</button>
                     <button type="button" data-side="both" aria-pressed="false">Both</button>
@@ -187,7 +209,7 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
             </tr></thead>
             <tbody>
             <?php foreach ($drops as $d): $mid = (int) $d['market_id']; ?>
-                <tr data-market-id="<?= $mid ?>" class="<?= $mid === $vm['selected'] ? 'is-selected' : '' ?>">
+                <tr data-market-id="<?= $mid ?>" data-event-id="<?= (int) $d['event_id'] ?>" class="<?= (int) $d['event_id'] === ($selectedEvent ?? -1) ? 'is-selected' : '' ?>">
                     <td>
                         <a href="<?= e(url('/index.php', ['market' => $mid])) ?>" data-market-id="<?= $mid ?>"><?= e($d['yes_subtitle'] ?: $d['market_title']) ?></a>
                         <span class="cell-sub"><?= e($d['event_title']) ?> · <?= prediction_link($mid) ?></span>
