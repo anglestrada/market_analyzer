@@ -169,8 +169,8 @@
     prediction(canvas, d) {
       const bars = d.bars || [];
       if (!bars.some((b) => b.model != null || b.kalshi != null)) return false;
-      const FIGHTER = { a: '#d9b382', b: '#c27c64' };   // fighter A sand, fighter B clay
-      const KALSHI = C.yes;                              // Kalshi is always green
+      const MODEL = { a: '#8fb4d6', b: '#b4a7d6' };    // model bars: fighter A blue, fighter B violet
+      const KALSHI = { a: C.yes, b: '#d9b382' };        // Kalshi lines: fighter A green, fighter B sand
       const pct = (v) => (v == null ? 'n/a' : `${(+v).toFixed(1)}%`);
       const kalshiMarks = {
         id: 'kalshiMarks',
@@ -182,7 +182,7 @@
             if (b.kalshi == null) return;
             const cx = x.getPixelForValue(i);
             const py = y.getPixelForValue(b.kalshi);
-            ctx.strokeStyle = KALSHI;
+            ctx.strokeStyle = KALSHI[b.side] || C.yes;
             ctx.lineWidth = 2;
             ctx.setLineDash([3, 4]);
             ctx.beginPath();
@@ -190,7 +190,7 @@
             ctx.lineTo(cx + half - 8, py);
             ctx.stroke();
             ctx.setLineDash([]);
-            ctx.fillStyle = KALSHI;
+            ctx.fillStyle = KALSHI[b.side] || C.yes;
             ctx.font = `12px ${Chart.defaults.font.family}`;
             ctx.textAlign = 'right';
             ctx.textBaseline = 'bottom';
@@ -219,7 +219,7 @@
           labels: bars.map((b) => b.name),
           datasets: [{
             label: 'Model', data: bars.map((b) => b.model),
-            backgroundColor: bars.map((b) => FIGHTER[b.side] || C.slate), borderRadius: 2, barPercentage: 0.55, categoryPercentage: 1,
+            backgroundColor: bars.map((b) => MODEL[b.side] || C.sky), borderRadius: 2, barPercentage: 0.55, categoryPercentage: 1,
           }],
         },
         options: {

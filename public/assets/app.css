@@ -555,15 +555,4 @@ form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
 .res { background: none !important; padding: 0; min-width: 0; font-size: 13px; }
 .res-w { color: var(--accent); } .res-l { color: var(--down); } .res-d, .res-nc { color: var(--text-2); }
 
-/* fighters: A sand, B clay; Kalshi is always green; no blue/violet */
-.model-text { color: var(--text); }
-.model-a { color: #d9b382; } .model-b { color: #c27c64; }
-.kalshi-a, .kalshi-b { color: #7ccba6; }
-.dot-a { background: #d9b382; } .dot-b { background: #c27c64; }
-.pill-model { border-color: var(--border-strong); color: var(--text); }
-.pred-link { color: var(--text-2); }
-.pred-link:hover { color: var(--text); }
-.vtabs [data-vtab][aria-selected="true"] { border-bottom-color: var(--text); }
-.vtab-p { color: var(--muted); }
-.delta-bar .pos { background: var(--text-2); }
 .legend-row { font-size: 12px; color: var(--muted); }
