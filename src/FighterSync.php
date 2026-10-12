@@ -292,12 +292,12 @@ final class FighterSync
             ':name'   => $p['displayName'] ?? $p['fullName'] ?? $f['full_name'],
             ':nick'   => $p['nickname'] ?? null,
             ':dob'    => !empty($p['dateOfBirth']) ? substr((string) $p['dateOfBirth'], 0, 10) : null,
-            ':h'      => isset($p['height']) && is_numeric($p['height']) ? $p['height'] : null,
-            ':r'      => isset($p['reach']) && is_numeric($p['reach']) ? $p['reach'] : null,
-            ':wt'     => isset($p['weight']) && is_numeric($p['weight']) ? $p['weight'] : null,
-            ':st'     => is_array($p['stance'] ?? null) ? ($p['stance']['text'] ?? null) : ($p['stance'] ?? null),
-            ':a'      => is_array($p['association'] ?? null) ? ($p['association']['name'] ?? null) : ($p['association'] ?? null),
-            ':c'      => $p['citizenship'] ?? null,
+            ':h'      => self::positive($p['height'] ?? null),
+            ':r'      => self::positive($p['reach'] ?? null),
+            ':wt'     => self::positive($p['weight'] ?? null),
+            ':st'     => self::text(is_array($p['stance'] ?? null) ? ($p['stance']['text'] ?? null) : ($p['stance'] ?? null)),
+            ':a'      => self::text(is_array($p['association'] ?? null) ? ($p['association']['name'] ?? null) : ($p['association'] ?? null)),
+            ':c'      => self::text($p['citizenship'] ?? null),
             ':wc'     => is_array($p['weightClass'] ?? null) ? ($p['weightClass']['text'] ?? null) : ($p['weightClass'] ?? null),
             ':styles' => isset($p['styles']) ? self::json($p['styles']) : null,
             ':ranks'  => isset($p['ranks']) ? self::json($p['ranks']) : null,
@@ -627,6 +627,19 @@ final class FighterSync
             return [false, null];
         }
         return [true, preg_match('/interim/i', $typeText) ? 'interim' : 'undisputed'];
+    }
+
+    /** ESPN reports unknown height/reach/weight as 0. */
+    public static function positive(mixed $v): ?float
+    {
+        return is_numeric($v) && (float) $v > 0 ? (float) $v : null;
+    }
+
+    /** ESPN reports unknown text fields as "--". */
+    public static function text(mixed $v): ?string
+    {
+        $v = is_string($v) ? trim($v) : null;
+        return ($v === null || $v === '' || preg_match('/^[-–—\s]+$/u', $v)) ? null : $v;
     }
 
     private function say(string $m): void

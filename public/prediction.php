@@ -253,8 +253,9 @@ $reasonText = [
         $fmtNum = fn($v, $d = 2) => $v === null ? '—' : number_format((float) $v, $d);
         $rowsCmp = [
             'Record'                  => [$a['record'], $b['record']],
+            'Fights on ESPN (UFC / other)' => ["{$a['ufc_fights']} / {$a['other_fights']}", "{$b['ufc_fights']} / {$b['other_fights']}"],
             'Age'                     => [$a['age'] ?? '—', $b['age'] ?? '—'],
-            'Reach'                   => [$a['reach_in'] ? $a['reach_in'] . '"' : '—', $b['reach_in'] ? $b['reach_in'] . '"' : '—'],
+            'Reach'                   => [$a['reach_in'] ? rtrim(rtrim(number_format($a['reach_in'], 1), '0'), '.') . '"' : '—', $b['reach_in'] ? rtrim(rtrim(number_format($b['reach_in'], 1), '0'), '.') . '"' : '—'],
             'Stance'                  => [$a['stance'] ?? '—', $b['stance'] ?? '—'],
             'Style (from stats)'      => [$a['style'] ?? '—', $b['style'] ?? '—'],
             'Resume score'            => [$fmtNum($a['resume']), $fmtNum($b['resume'])],
@@ -265,7 +266,7 @@ $reasonText = [
             'Control time'            => [$fmtPct($a['perf']['ctrl'] ?? null), $fmtPct($b['perf']['ctrl'] ?? null)],
             'Knockdowns / 15 min'     => [$fmtNum($a['perf']['kd15'] ?? null), $fmtNum($b['perf']['kd15'] ?? null)],
             'Sub attempts / 15 min'   => [$fmtNum($a['perf']['sub15'] ?? null), $fmtNum($b['perf']['sub15'] ?? null)],
-            'Fights with stats used'  => [$a['perf_fights'], $b['perf_fights']],
+            'Fights with stats used'  => [$a['perf_fights'] . ' of ' . $a['fights_with_stats'], $b['perf_fights'] . ' of ' . $b['fights_with_stats']],
             'Months since last fight' => [$a['layoff_months'] ?? '—', $b['layoff_months'] ?? '—'],
         ];
         ?>

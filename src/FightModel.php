@@ -97,7 +97,11 @@ final class FightModel
         }
         $matchup = max(-3.0, min(3.0, $matchup));
 
-        // 4. Context
+        // 4. Context (reach counts only when ESPN has both)
+        if ($a['reach_in'] !== null && $b['reach_in'] !== null) {
+            $a['context']['reach'] = round(0.03 * ($a['reach_in'] - $b['reach_in']), 3);
+            $a['context']['total'] = round($a['context']['total'] + $a['context']['reach'], 3);
+        }
         $context = $a['context']['total'] - $b['context']['total'];
 
         $delta = self::W_RESUME * $resume + self::W_PERF * $perf + self::W_MATCHUP * $matchup + self::W_CONTEXT * $context;
@@ -110,7 +114,12 @@ final class FightModel
                 $notes[] = "{$f['name']}'s ESPN history is still syncing, so this number will change.";
             }
             if ($f['perf_fights'] === 0) {
-                $notes[] = "{$f['name']} has no fights with ESPN stats, so performance and matchup are left out for that side.";
+                $why = $f['ufc_fights'] === 0
+                    ? "all {$f['fights']} of their fights on ESPN are outside the UFC, and ESPN only has stats for UFC fights"
+                    : ($f['fights_with_stats'] === 0
+                        ? "ESPN returned no stats for their {$f['ufc_fights']} UFC fight(s)"
+                        : 'none of their fights with stats have both fighters\' stats and a known duration');
+                $notes[] = "No performance stats for {$f['name']}: $why. Performance and matchup are left out for that side.";
             } elseif ($f['perf_fights'] < 3) {
                 $notes[] = "{$f['name']} has only {$f['perf_fights']} fight(s) with ESPN stats.";
             }
@@ -148,6 +157,10 @@ final class FightModel
         if (!$f || $f['profile_synced_at'] === null) {
             return null;
         }
+        // Rows synced before the placeholder fix may still hold 0 / "--".
+        $f['reach_in']  = FighterSync::positive($f['reach_in']);
+        $f['height_in'] = FighterSync::positive($f['height_in']);
+        $f['stance']    = FighterSync::text($f['stance']);
 
         $stmt = $this->db->prepare(
             "SELECT fi.id AS fight_id, fi.fight_date, fi.league, fi.is_title, fi.title_type, fi.method, fi.weight_class,
@@ -196,7 +209,7 @@ final class FightModel
 
         // ---- 2. Performance (UFC fights with stats for both fighters, most recent first)
         $stmt = $this->db->prepare(
-            "SELECT fi.fight_date, fi.duration_seconds, fp.opponent_id,
+            "SELECT fi.fight_date, COALESCE(fi.duration_seconds, CASE WHEN fi.method LIKE 'Decision%' THEN fi.scheduled_rounds * 300 END) AS duration_seconds, fp.opponent_id,
                     me.sig_strikes_landed AS sl, me.sig_strikes_attempted AS sa, me.knockdowns AS kd,
                     me.takedowns_landed AS tdl, me.takedowns_attempted AS tda, me.control_seconds AS ctrl,
                     me.submission_attempts AS sub, me.sig_distance_landed AS dist, me.sig_clinch_landed AS clinch,
@@ -210,7 +223,8 @@ final class FightModel
                JOIN fight_stats op ON op.fight_id = fp.fight_id AND op.fighter_id = fp.opponent_id
           LEFT JOIN fight_participants ow ON ow.fight_id = fp.fight_id AND ow.fighter_id = fp.opponent_id
           LEFT JOIN fighters o ON o.id = fp.opponent_id
-              WHERE fp.fighter_id = :id AND fi.status_state = 'post' AND fi.duration_seconds >= 60 AND fi.fight_date < :asof
+              WHERE fp.fighter_id = :id AND fi.status_state = 'post' AND fi.fight_date < :asof
+                AND COALESCE(fi.duration_seconds, CASE WHEN fi.method LIKE 'Decision%' THEN fi.scheduled_rounds * 300 END) >= 60
               ORDER BY fi.fight_date DESC
               LIMIT " . self::PERF_FIGHTS
         );
@@ -271,18 +285,27 @@ final class FightModel
             && !preg_match('/' . preg_quote(self::division((string) $upcomingClass), '/') . '/i', (string) $last['weight_class']);
         $ctx = [
             'age'      => $age !== null ? -0.15 * max(0, $age - 33) : 0.0,
-            'reach'    => $f['reach_in'] !== null ? 0.03 * ((float) $f['reach_in'] - 70) : 0.0,  // relative; the 70 cancels out
+            'reach'    => 0.0,   // set in predictMarket(), only when both reaches are known
             'layoff'   => $layoff !== null && $layoff > 18 ? -0.2 : 0.0,
             'division' => $newDiv ? -0.2 : 0.0,
         ];
         $ctx['total'] = array_sum($ctx);
 
         $wins = count(array_filter($fights, fn($r) => $r['result'] === 'W'));
+        $ufc  = count(array_filter($fights, fn($r) => ($r['league'] ?? 'ufc') === 'ufc'));
+        $stmt = $this->db->prepare(
+            "SELECT COUNT(*) FROM fight_participants fp JOIN fights fi ON fi.id = fp.fight_id
+              WHERE fp.fighter_id = :id AND fi.status_state = 'post'
+                AND EXISTS (SELECT 1 FROM fight_stats s WHERE s.fight_id = fi.id AND s.fighter_id = fp.fighter_id)"
+        );
+        $stmt->execute([':id' => $fighterId]);
+        $withStats = (int) $stmt->fetchColumn();
         return [
             'id' => $fighterId, 'name' => $f['full_name'], 'record' => "{$f['wins']}-{$f['losses']}-{$f['draws']}",
             'age' => $age !== null ? (int) floor($age) : null, 'height_in' => $f['height_in'], 'reach_in' => $f['reach_in'],
             'stance' => $f['stance'], 'weight_class' => $f['weight_class'], 'association' => $f['association'],
-            'fights' => count($fights), 'wins_stored' => $wins, 'fights_listed' => $f['fights_listed'],
+            'fights' => count($fights), 'wins_stored' => $wins, 'ufc_fights' => $ufc, 'other_fights' => count($fights) - $ufc,
+            'fights_with_stats' => $withStats, 'fights_listed' => $f['fights_listed'],
             'resume' => round($resume, 4), 'resume_rows' => $resumeRows, 'approx_records' => $approx,
             'perf' => $perf, 'perf_fights' => count($statRows), 'shares' => $shares, 'style' => $style,
             'context' => array_map(fn($v) => round($v, 3), $ctx),
