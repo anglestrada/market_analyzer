@@ -82,7 +82,6 @@ if ($eventId <= 0) {
     ?>
     <div class="page-head">
         <div>
-            <p class="eyebrow">UFC / Personal model</p>
             <h1>Fight prediction</h1>
             <p class="page-sub">The model's chance for each fighter next to the Kalshi price. Research only, not betting advice.</p>
         </div>
@@ -220,48 +219,6 @@ $snapB = $latest($bId);
 $kA = $snapA['p'] ?? null;
 $kB = $snapB['p'] ?? ($kA !== null ? 1 - $kA : null);   // only one market on Kalshi → its NO side
 
-/* ---------- chart: both fighters, Kalshi (snapshots) and model (saved predictions) ---------- */
-$ranges = ['24h' => '-24 hours', '7d' => '-7 days', '30d' => '-30 days', 'all' => null];
-$range  = array_key_exists($_GET['range'] ?? '', $ranges) ? $_GET['range'] : '7d';
-$now    = new DateTimeImmutable('now', new DateTimeZone('UTC'));
-$from   = $ranges[$range] ? $now->modify($ranges[$range]) : new DateTimeImmutable('2000-01-01', new DateTimeZone('UTC'));
-
-$kalshiSeries = function (int $id) use ($from): array {
-    $q = db()->prepare('SELECT captured_at, yes_price FROM market_snapshots
-                         WHERE market_id = :m AND captured_at >= :from AND yes_price IS NOT NULL ORDER BY captured_at');
-    $q->execute([':m' => $id, ':from' => $from->format('c')]);
-    $rows  = $q->fetchAll();
-    $every = max(1, (int) ceil(count($rows) / 600));   // ≤ ~600 points per line
-    $out   = [];
-    foreach ($rows as $i => $r) {
-        if ($i % $every === 0 || $i === count($rows) - 1) {
-            $out[] = ['x' => iso($r['captured_at']), 'y' => round((float) $r['yes_price'] * 100, 2)];
-        }
-    }
-    return $out;
-};
-$modelSeries = function (int $id, string $version, ?float $live, ?string $startX) use ($from, $now): array {
-    $q = db()->prepare('SELECT created_at, win_probability FROM predictions
-                         WHERE market_id = :m AND model_version = :v AND created_at >= :from ORDER BY created_at');
-    $q->execute([':m' => $id, ':v' => $version, ':from' => $from->format('c')]);
-    $out = array_map(fn($r) => ['x' => iso($r['created_at']), 'y' => round((float) $r['win_probability'] * 100, 2)], $q->fetchAll());
-    // Start at the edge of the range with the value the model had then.
-    $q = db()->prepare('SELECT win_probability FROM predictions WHERE market_id = :m AND model_version = :v AND created_at < :from
-                         ORDER BY created_at DESC LIMIT 1');
-    $q->execute([':m' => $id, ':v' => $version, ':from' => $from->format('c')]);
-    if (($before = $q->fetchColumn()) !== false && $before !== null) {
-        array_unshift($out, ['x' => $startX ?? iso($from->format('c')), 'y' => round((float) $before * 100, 2)]);
-    }
-    // Points are only saved when the number moves; carry the live value to now.
-    if ($live !== null) {
-        $out[] = ['x' => iso($now->format('c')), 'y' => round($live * 100, 2)];
-    }
-    return $out;
-};
-$flip = fn(array $series) => array_map(fn($pt) => ['x' => $pt['x'], 'y' => round(100 - $pt['y'], 2)], $series);
-
-$kSeriesA = $kalshiSeries($aId);
-$kSeriesB = $bId !== null ? $kalshiSeries($bId) : $flip($kSeriesA);
 // One tab per model version (v1, v2, …); each has its own numbers, chart and breakdown. Default: v1.
 $versions = FightModel::versions();
 $tab      = in_array($_GET['v'] ?? '', $versions, true) ? $_GET['v'] : FightModel::DEFAULT_VERSION;
@@ -269,19 +226,15 @@ $panels   = [];
 foreach ($versions as $v) {
     $vr = $v === FightModel::DEFAULT_VERSION ? $res : (new FightModel(db(), $v))->predictMarket($aId);
     $vp = $vr['ok'] ? (float) $vr['p'] : null;
-    $mSeriesA = $modelSeries($aId, $v, $vp, $kSeriesA[0]['x'] ?? null);
-    $mSeriesB = $flip($mSeriesA);   // the model's two chances always add up to 100%
-    // Fighter A: green Kalshi / blue model. Fighter B: sand Kalshi / violet model. Kalshi = solid, model = stepped + dots.
-    $vlines = [
-        ['label' => "$nameA · Kalshi", 'kind' => 'kalshi', 'color' => '#7ccba6', 'data' => $kSeriesA],
-        ['label' => "$nameA · Model $v",  'kind' => 'model',  'color' => '#8fb4d6', 'data' => $mSeriesA],
-        ['label' => "$nameB · Kalshi", 'kind' => 'kalshi', 'color' => '#d9b382', 'data' => $kSeriesB],
-        ['label' => "$nameB · Model $v",  'kind' => 'model',  'color' => '#b4a7d6', 'data' => $mSeriesB],
+    // Bar chart: one bar per fighter (model), with that fighter's Kalshi YES price as a dotted line over their bar.
+    $bars = [
+        ['name' => $nameA, 'model' => $vp !== null ? round($vp * 100, 1) : null, 'kalshi' => $kA !== null ? round($kA * 100, 1) : null, 'side' => 'a'],
+        ['name' => $nameB, 'model' => $vp !== null ? round((1 - $vp) * 100, 1) : null, 'kalshi' => $kB !== null ? round($kB * 100, 1) : null, 'side' => 'b'],
     ];
-    $panels[$v] = ['res' => $vr, 'p' => $vp, 'lines' => $vlines, 'hasChart' => (bool) array_filter($vlines, fn($l) => $l['data'])];
+    $panels[$v] = ['res' => $vr, 'p' => $vp, 'bars' => $bars, 'hasChart' => $vp !== null || $kA !== null];
 }
 
-log_activity('market_view', null, $aId, ['source' => 'prediction', 'range' => $range]);
+log_activity('market_view', null, $aId, ['source' => 'prediction']);
 page_header('Prediction · ' . $nameA . ' vs ' . $nameB, $user, ['nav' => 'prediction']);
 
 $reasonText = [
@@ -308,7 +261,6 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 
 <div class="page-head">
     <div>
-        <p class="eyebrow">Personal model</p>
         <h1><?= e($nameA) ?> <span class="muted">vs</span> <?= e($nameB) ?></h1>
         <div class="meta">
             <?= badge($primary['status']) ?>
@@ -333,7 +285,7 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 </nav>
 
 <?php foreach ($panels as $v => $pn):
-    $res = $pn['res']; $p = $pn['p']; $lines = $pn['lines']; $hasChart = $pn['hasChart']; ?>
+    $res = $pn['res']; $p = $pn['p']; $bars = $pn['bars']; $hasChart = $pn['hasChart']; ?>
 <div class="vpanel" role="tabpanel" data-vpanel="<?= e($v) ?>" data-desc="<?= e(FightModel::VERSIONS[$v]['description']) ?>"<?= $v === $tab ? '' : ' hidden' ?>>
 <?php if (!$res['ok']): [$t, $txt] = $reasonText[$res['reason']] ?? ['Prediction unavailable', e($res['reason'])]; ?>
     <section class="card"><div class="news-status"><b><?= e($t) ?></b><p><?= $txt ?></p></div></section>
@@ -345,23 +297,10 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 </section>
 
 <section class="card">
-    <div class="card-head wrap">
-        <h2>Win chance over time · model <?= e($v) ?></h2>
-        <div class="range">
-            <?php foreach (array_keys($ranges) as $key): ?>
-                <a class="pill<?= $range === $key ? ' active' : '' ?>" href="<?= e(url('/prediction.php', ['event' => $eventId, 'market' => $aId, 'range' => $key, 'v' => $v])) ?>"><?= e($key) ?></a>
-            <?php endforeach; ?>
-        </div>
-    </div>
-    <div class="legend-row">
-        <?php foreach ($lines as $l): ?>
-            <span><i class="swatch swatch-<?= e($l['kind']) ?>" style="--c:<?= e($l['color']) ?>"></i><?= e($l['label']) ?></span>
-        <?php endforeach; ?>
-        <span><i class="swatch swatch-even"></i>50%</span>
-    </div>
-    <div class="chart-box h-320"><canvas data-chart="prediction" data-source="d-pred-<?= e($v) ?>" data-empty="No price or prediction history in this period yet."></canvas></div>
-    <?= json_script('d-pred-' . $v, $hasChart ? ['lines' => $lines] : null) ?>
-    <p class="hint">Solid lines are Kalshi's YES price for each fighter; stepped lines are the model. The model saves a point whenever its number moves by 0.5 pp or more (and at least every 6 hours).</p>
+    <div class="card-head"><h2>Win chance, model <?= e($v) ?></h2></div>
+    <p class="legend-row">Bars: the model's chance for each fighter. Dotted line: that fighter's Kalshi YES price.</p>
+    <div class="chart-box h-320"><canvas data-chart="prediction" data-source="d-pred-<?= e($v) ?>" data-empty="No model or Kalshi number for this fight yet."></canvas></div>
+    <?= json_script('d-pred-' . $v, $hasChart ? ['bars' => $bars] : null) ?>
 </section>
 
 <?php if ($res['ok']):

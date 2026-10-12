@@ -41,7 +41,6 @@ $cents = fn(?float $c) => $c === null ? '—' : number_format($c, $c == floor($c
 
 <header class="page-head">
     <div>
-        <p class="eyebrow">UFC / Market research</p>
         <h1>Overview</h1>
         <p class="page-sub">Price changes, price history, and possible explanations from the news.</p>
     </div>

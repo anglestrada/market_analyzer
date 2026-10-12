@@ -46,7 +46,6 @@ page_header('Market history', $user);
 ?>
 <header class="page-head">
     <div>
-        <p class="eyebrow">UFC / Market history</p>
         <h1>Market history</h1>
         <p class="page-sub">Every YES or NO drop of ≥ <?= (int) MOVEMENT_THRESHOLD_PP ?> pp between two consecutive scans, plus closed and settled markets.</p>
     </div>
