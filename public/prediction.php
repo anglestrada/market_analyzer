@@ -307,7 +307,7 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
     $a = $res['a'];
     $b = $res['b'];
     $parts = $res['parts'];
-    $labels = ['resume' => 'Resume (who they beat, how, how recently)', 'performance' => 'Performance (fight stats)',
+    $labels = ['resume' => 'Resume (who they beat, how, and how recently)', 'performance' => 'Performance (fight stats)',
                'matchup' => 'Style matchup (offense vs. the other\'s defense)', 'context' => 'Context (age, reach, layoff, division)'];
 ?>
 <div class="grid grid-2">
