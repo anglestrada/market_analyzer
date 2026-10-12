@@ -162,36 +162,81 @@
       });
     },
 
-    /** Fight prediction: both fighters' Kalshi YES price (solid) and model chance (stepped), with a 50% line. */
+    /**
+     * Fight prediction: one bar per fighter (the model's chance), and that fighter's Kalshi YES price as a
+     * dotted line drawn across their half only. The x-axis is the two fighters' names.
+     */
     prediction(canvas, d) {
-      const lines = (d.lines || []).filter((l) => l.data && l.data.length);
-      if (!lines.length) return false;
-      const xs = lines.flatMap((l) => l.data.map((p) => Date.parse(p.x)));
-      const even = [{ x: Math.min(...xs), y: 50 }, { x: Math.max(...xs), y: 50 }];
-      const pct = (v) => (v == null ? '—' : `${(+v).toFixed(1)}%`);
-      const ds = lines.map((l) => (l.kind === 'model'
-        ? { label: l.label, data: l.data, borderColor: l.color, backgroundColor: l.color, borderWidth: 2.5, stepped: true, spanGaps: true, order: 1,
-            pointRadius: (ctx) => (ctx.dataIndex === ctx.dataset.data.length - 1 ? 4 : 2), pointBackgroundColor: l.color }
-        : { label: l.label, data: l.data, borderColor: l.color, backgroundColor: l.color, borderWidth: 1.75, tension: 0.2, spanGaps: true, fill: false, order: 2 }));
-      ds.push({ label: '50%', data: even, borderColor: rgba(C.slate, 0.9), borderWidth: 1, borderDash: [4, 4], pointRadius: 0, fill: false, order: 3 });
+      const bars = d.bars || [];
+      if (!bars.some((b) => b.model != null || b.kalshi != null)) return false;
+      const FIGHTER = { a: '#d9b382', b: '#c27c64' };   // fighter A sand, fighter B clay
+      const KALSHI = C.yes;                              // Kalshi is always green
+      const pct = (v) => (v == null ? 'n/a' : `${(+v).toFixed(1)}%`);
+      const kalshiMarks = {
+        id: 'kalshiMarks',
+        afterDatasetsDraw(chart) {
+          const { ctx, scales: { x, y } } = chart;
+          const half = (x.getPixelForValue(1) - x.getPixelForValue(0)) / 2;
+          ctx.save();
+          bars.forEach((b, i) => {
+            if (b.kalshi == null) return;
+            const cx = x.getPixelForValue(i);
+            const py = y.getPixelForValue(b.kalshi);
+            ctx.strokeStyle = KALSHI;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([3, 4]);
+            ctx.beginPath();
+            ctx.moveTo(cx - half + 8, py);
+            ctx.lineTo(cx + half - 8, py);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = KALSHI;
+            ctx.font = `12px ${Chart.defaults.font.family}`;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(`Kalshi ${pct(b.kalshi)}`, cx + half - 8, py - 4);
+          });
+          ctx.restore();
+        },
+      };
+      const modelLabels = {
+        id: 'modelLabels',
+        afterDatasetsDraw(chart) {
+          const meta = chart.getDatasetMeta(0);
+          const { ctx } = chart;
+          ctx.save();
+          ctx.fillStyle = css('--text');
+          ctx.font = `600 13px ${Chart.defaults.font.family}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          meta.data.forEach((el, i) => { if (bars[i].model != null) ctx.fillText(pct(bars[i].model), el.x, el.y - 6); });
+          ctx.restore();
+        },
+      };
       return new Chart(canvas, {
-        type: 'line',
-        data: { datasets: ds },
+        type: 'bar',
+        data: {
+          labels: bars.map((b) => b.name),
+          datasets: [{
+            label: 'Model', data: bars.map((b) => b.model),
+            backgroundColor: bars.map((b) => FIGHTER[b.side] || C.slate), borderRadius: 2, barPercentage: 0.55, categoryPercentage: 1,
+          }],
+        },
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          interaction: { mode: 'nearest', axis: 'x', intersect: false },
-          scales: { x: timeX(), y: { min: 0, max: 100, ticks: { callback: (v) => `${v}%`, stepSize: 25 } } },
+          animation: false,
+          layout: { padding: { top: 18 } },
+          scales: {
+            x: { grid: { display: false }, ticks: { color: css('--text'), font: { size: 13, weight: '600' } } },
+            y: { min: 0, max: 100, ticks: { callback: (v) => `${v}%`, stepSize: 25 } },
+          },
           plugins: {
             legend: { display: false },
-            zoom: zoomOptions(),
-            tooltip: {
-              mode: 'index',
-              filter: (i) => i.dataset.label !== '50%',
-              callbacks: { label: (i) => ` ${i.dataset.label}: ${pct(i.parsed.y)}` },
-            },
+            tooltip: { callbacks: { label: (i) => ` Model: ${pct(i.parsed.y)} · Kalshi: ${pct(bars[i.dataIndex].kalshi)}` } },
           },
         },
+        plugins: [kalshiMarks, modelLabels],
       });
     },
 
@@ -959,7 +1004,6 @@
       const u = new URL(location.href);
       u.searchParams.set('v', v);
       history.replaceState(null, '', u);
-      $$('.vpanel .range a').forEach((a) => { const x = new URL(a.href, location.href); x.searchParams.set('v', v); a.href = x; });
     };
     tabs.forEach((t) => t.addEventListener('click', () => show(t.dataset.vtab)));
   }
@@ -971,7 +1015,6 @@
   initSorting();
   initFilters();
   initOverview();
-  countUp();
   initFlash();
   initBusyForms();
   initAutoRefresh();

@@ -46,27 +46,9 @@ page_header('Scans', $admin);
 
 <div class="kpis">
     <?= kpi('Markets', count_num((int) $totals['markets']), fmt_int($totals['open_markets']) . ' open', 'accent', 'markets') ?>
-    <?= kpi('Snapshots', count_num((int) $totals['snapshots']), 'kept forever', 'sky', 'scans') ?>
+    <?= kpi('Snapshots', count_num((int) $totals['snapshots']), '', 'sky', 'scans') ?>
     <?= kpi('Movements', count_num((int) $totals['movements']), fmt_int($totals['articles']) . ' relevant articles', 'amber', 'movements') ?>
     <?= kpi('Success · 48h', $health ? count_num($okRate, 0, '%') : '—', count($health) . ' scans', $okRate !== null && $okRate < 90 ? 'red' : 'green', 'scans') ?>
-</div>
-
-<div class="stat-chips">
-    <div><span>Kalshi requests</span><b><?= kalshi_auth_available() ? 'signed' : 'public' ?></b></div>
-    <div><span>Series</span><b><?= e(KALSHI_UFC_SERIES) ?></b></div>
-    <div><span>TheNewsAPI</span><b><?= NEWS_API_TOKEN ? 'configured' : 'missing token' ?></b></div>
-    <div><span>News search</span><b><?= NEWS_PAGE_SIZE ?> per page · up to <?= NEWS_MAX_PAGES ?> pages</b></div>
-    <div><span>"Enough" score</span><b>≥ <?= NEWS_CONFIDENT_SCORE ?></b></div>
-    <div><span>News lookback</span><b><?= NEWS_LOOKBACK_HOURS ?>h</b></div>
-</div>
-
-<?php $live = evidence_sources_configured();
-$espnAt = db()->query("SELECT MAX(espn_checked_at) FROM events")->fetchColumn(); ?>
-<div class="stat-chips">
-    <div><span>ESPN (fight, plays, news)</span><b><?= $live['espn'] ? 'on · no key needed' : 'off' ?></b></div>
-    <div><span>ESPN fight info</span><b><?= $espnAt ? 'updated ' . reltime($espnAt) : 'not fetched yet' ?></b></div>
-    <div><span>Kalshi trades</span><b><?= $live['kalshi_trades'] ? 'on' : 'off' ?></b></div>
-    <div><span>Play-by-play window</span><b>previous scan − <?= LIVE_LOOKBACK_MINUTES ?> min</b></div>
 </div>
 
 <section class="card">

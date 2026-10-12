@@ -308,8 +308,7 @@ function page_footer(?array $user = null): void
     ?>
 </main>
 <footer class="foot">
-    Market data analysis only — not a prediction or trading recommendation.
-    News shown next to a price drop is a possible explanation; causation is unverified.
+    A research tool, not betting or trading advice. News shown next to a price drop might explain it, or might not.
 </footer>
 <?php if ($user): ?>
     </div>
