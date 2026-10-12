@@ -158,6 +158,10 @@ final class Scanner
             try {
                 $sync = (new FighterSync($this->db, new EspnClient(), fn(string $m) => $this->say($m)))->run(FIGHTER_SYNC_SCAN_BUDGET);
                 (new FightModel($this->db))->predictAll($sync['run_id'], fn(string $m) => $this->say($m));
+                // Score finished fights against the result (database + a few Kalshi settlement lookups).
+                $eval = new ModelEvaluator($this->db, new FightModel($this->db), $this->kalshi);
+                $eval->resolve(fn(string $m) => $this->say($m));
+                $eval->backtest(fn(string $m) => $this->say($m));
             } catch (Throwable $e) {
                 $this->say('Fight prediction update failed: ' . $e->getMessage());
                 error_log('[fight-prediction] ' . $e);

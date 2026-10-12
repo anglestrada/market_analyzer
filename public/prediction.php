@@ -78,6 +78,37 @@ if ($eventId <= 0) {
             <p class="page-sub">The model's chance for each fighter next to the Kalshi price. Research only, not betting advice.</p>
         </div>
     </div>
+    <?php
+    try {
+        $score = db()->query("SELECT * FROM model_scorecard WHERE fights > 0 ORDER BY model_version DESC, source")->fetchAll();
+    } catch (PDOException) {
+        $score = [];   // scoring tables not created yet (run schema.sql)
+    }
+    if ($score): ?>
+    <section class="card">
+        <div class="card-head"><h2>How the model has done</h2><span class="muted small">finished fights · lower Brier is better (0.25 = always 50%)</span></div>
+        <div class="table-wrap">
+        <table class="table">
+            <thead><tr><th>Version</th><th class="num">Fights</th><th class="num">Picked winner</th><th class="num">Brier</th>
+                <th class="num">Kalshi picked winner</th><th class="num">Kalshi Brier</th><th class="num" title="1 − model Brier / Kalshi Brier on the same fights; above 0 = beat the market">Skill vs Kalshi</th></tr></thead>
+            <tbody>
+            <?php foreach ($score as $sc): ?>
+                <tr>
+                    <td><b><?= e($sc['model_version']) ?></b> <span class="muted small"><?= e($sc['source'] === 'live' ? 'live' : 'backtest') ?></span></td>
+                    <td class="num"><?= (int) $sc['fights'] ?></td>
+                    <td class="num"><?= $sc['model_accuracy_pct'] !== null ? e($sc['model_accuracy_pct']) . '%' : '—' ?></td>
+                    <td class="num"><?= e((string) ($sc['model_brier'] ?? '—')) ?></td>
+                    <td class="num"><?= $sc['kalshi_accuracy_pct'] !== null ? e($sc['kalshi_accuracy_pct']) . '%' : '—' ?></td>
+                    <td class="num"><?= e((string) ($sc['kalshi_brier'] ?? '—')) ?></td>
+                    <td class="num"><?php $sk = $sc['brier_skill_vs_kalshi']; echo $sk === null ? '—' : '<b class="' . ((float) $sk >= 0 ? 'up' : 'down') . '">' . e(sprintf('%+.3f', (float) $sk)) . '</b>'; ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        </div>
+        <p class="hint"><b>live</b> = predictions saved before the fight · <b>backtest</b> = the current version rerun with only pre-fight data. Full report: <code>php bin/model_report.php</code></p>
+    </section>
+    <?php endif; ?>
     <?php if (!$fights): ?>
         <div class="empty card"><?= icon('target') ?><p>No open UFC markets yet. Run a scan first.</p></div>
     <?php else: ?>

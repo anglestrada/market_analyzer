@@ -166,6 +166,40 @@ php bin/espn_probe.php "Fighter Name"     # see what ESPN returns for a fighter
 To fix a wrong match, update `market_fighters` (`fighter_id` / `opponent_id`) and set `match_method = 'manual'`.
 The sync job never overwrites manual rows.
 
+## Scoring the fight model
+
+Every saved prediction records the model version, a hash of its parameters, and both fighters' inputs (`predictions.inputs`).
+The exact formula behind each version is kept in `model_versions.params`, a copy of `FightModel::PARAMS`.
+**Change any number in `PARAMS` → bump `FightModel::VERSION`.**
+
+After each fight, the scanner fills `prediction_results` with one row per fight per version:
+- the last prediction saved **before the fight started** (source `live`)
+- Kalshi's price at the same moment, scaled so both fighters add up to 100%
+- the result, from Kalshi's settlement, or ESPN's final if Kalshi hasn't settled yet. Draws and no contests are
+  recorded but not scored.
+
+It also **backtests** the current version on every finished fight, using only data from before each fight (source
+`backtest`). A new version can therefore be compared with old ones on the same fights straight away.
+
+| Score | Meaning |
+|---|---|
+| Accuracy | picked the winner (> 50%) |
+| Brier | `(p − result)²` averaged. 0 = perfect, 0.25 = always saying 50%. **Lower is better** |
+| Log loss | `−ln(chance given to the winner)`. Punishes confident misses. Lower is better |
+| Skill vs Kalshi | `1 − Brier(model) / Brier(Kalshi)` on the same fights. **Above 0 = the model beat the market** |
+| Calibration | e.g. of the fights where the model's favourite had 70–80%, how many actually won |
+| Parts | how often resume / performance / matchup / context pointed at the winner, and their correlation with the result |
+
+```bash
+php bin/model_report.php                 # report + a "PASTE THIS" block to send back for tuning
+php bin/model_report.php --source=live   # only real pre-fight predictions
+php bin/model_report.php --redo-backtest # after changing the model
+```
+Quick view in psql: `SELECT * FROM model_scorecard;`. The same scorecard is shown at the top of the Fight prediction tab.
+
+Backtest caveat: a fighter's *current* record is still used when an opponent's record on the day is unknown, so
+backtests can be slightly optimistic. Trust `live` most.
+
 ## Notes
 
 - TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3
