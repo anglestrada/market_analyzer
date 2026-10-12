@@ -243,6 +243,73 @@
       });
     },
 
+    /**
+     * Model accuracy: running share of fights picked right, one line per model version (colours from the page)
+     * and the Kalshi favourite as a dashed line. Steps after each fight.
+     */
+    accuracy(canvas, d) {
+      const series = (d.series || []).filter((s) => (s.points || []).length);
+      if (!series.length) return false;
+      const single = series.every((s) => s.points.length < 2);
+      return new Chart(canvas, {
+        type: 'line',
+        data: {
+          datasets: series.map((s) => ({
+            label: s.label, data: s.points, borderColor: s.color, backgroundColor: s.color,
+            borderDash: s.dashed ? [5, 4] : [], borderWidth: s.dashed ? 1.5 : 2, stepped: 'after',
+            pointRadius: single || s.points.length < 25 ? 2.5 : 0,
+          })),
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          scales: {
+            x: timeX({ time: { tooltipFormat: 'MMM d, yyyy' } }),
+            y: { min: 0, max: 100, ticks: { callback: (v) => `${v}%`, stepSize: 25 } },
+          },
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: (i) => ` ${i.dataset.label}: ${i.parsed.y.toFixed(1)}% after ${i.raw.n} fight${i.raw.n === 1 ? '' : 's'}` } },
+          },
+        },
+      });
+    },
+
+    /** Model accuracy: right vs wrong picks per month (stacked). */
+    accuracyMonthly(canvas, d) {
+      const m = d.months || [];
+      if (!m.length) return false;
+      const label = (ym) => new Date(`${ym}-01T12:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+      return new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels: m.map((x) => label(x.m)),
+          datasets: [
+            { label: 'Right', data: m.map((x) => x.c), backgroundColor: rgba(C.up, 0.8), borderRadius: 2 },
+            { label: 'Wrong', data: m.map((x) => x.i), backgroundColor: rgba(C.down, 0.8), borderRadius: 2 },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } } },
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: {
+              callbacks: {
+                footer: (items) => {
+                  const x = m[items[0].dataIndex];
+                  const n = x.c + x.i;
+                  return n ? `${((x.c / n) * 100).toFixed(0)}% right` : '';
+                },
+              },
+            },
+          },
+        },
+      });
+    },
+
     /** Market page: YES bid/ask band and last trade. */
     spread(canvas, d) {
       const s = d.series || [];
@@ -1018,8 +1085,17 @@
       const u = new URL(location.href);
       u.searchParams.set('v', v);
       history.replaceState(null, '', u);
+      keepLinks(v);
     };
+    // Links that reload the page (source filter, "show all") keep the open tab.
+    const keepLinks = (v) => $$('a[data-keep-tab]').forEach((a) => {
+      const h = new URL(a.href, location.href);
+      h.searchParams.set('v', v);
+      a.href = h.toString();
+    });
     tabs.forEach((t) => t.addEventListener('click', () => show(t.dataset.vtab)));
+    const current = tabs.find((t) => t.getAttribute('aria-selected') === 'true');
+    if (current) keepLinks(current.dataset.vtab);
   }
 
   initCharts();

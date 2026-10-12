@@ -224,6 +224,22 @@ php bin/model_fit.php --version=v2      # fit v2's weights to the results (cross
 v3 is then added to `FightModel::VERSIONS`, with whatever works from v1 and v2 and the fitted weights. It gets its
 own tab, column and scorecard row automatically.
 
+## Model accuracy (`/accuracy.php`)
+
+This page shows how often each version picked the winner. It reads `prediction_results`, so it needs no new
+tables.
+- **All** tab: one accuracy-over-time line per version (v1 blue, v2 violet, v3 amber, v4 red…), the Kalshi favourite
+  as a dashed green line, versions side by side, and accuracy by finish (KO/TKO, Submission, Decision).
+- **One tab per version**, added automatically from `FightModel::VERSIONS`: right / wrong, last 10 fights, Kalshi
+  on the same fights, right vs wrong per month, accuracy by finish, and confidence (calibration).
+- **Fights** table: each version's pick (✓ / ✗), the Kalshi favourite, the winner, the finish (method, round, time),
+  and each fighter's significant strikes, knockdowns, takedowns and control time from ESPN.
+- **Source** filter: Live / Backtest / History. "All sources" keeps one row per fight per version, in the order
+  live, then backtest, then history.
+
+After a fight, the scan keeps syncing its fighters (hourly, for up to 14 days) until ESPN has the result and the
+fight stats. Those then appear in the Fights table. `php bin/fighters_sync.php --market=ID` does it right away.
+
 ## Notes
 
 - TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3

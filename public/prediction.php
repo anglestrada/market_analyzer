@@ -94,7 +94,7 @@ if ($eventId <= 0) {
     }
     if ($score): ?>
     <section class="card">
-        <div class="card-head"><h2>How the model has done</h2><span class="muted small">finished fights · lower Brier is better (0.25 = always 50%)</span></div>
+        <div class="card-head"><h2>How the model has done</h2><span class="muted small">finished fights · lower Brier is better (0.25 = always 50%) · <a href="<?= e(url('/accuracy.php')) ?>">Model accuracy</a></span></div>
         <div class="table-wrap">
         <table class="table">
             <thead><tr><th>Version</th><th class="num">Fights</th><th class="num">Picked winner</th><th class="num">Brier</th>
