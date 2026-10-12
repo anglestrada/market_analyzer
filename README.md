@@ -126,9 +126,10 @@ and table, and marks injury/withdrawal-type keywords as "bad for the fighter".
 
 ## Fight prediction (personal model)
 
-The **Fight prediction** tab (`/prediction.php`) shows the model's chance for each fighter next to the Kalshi price.
-One fight's page has:
-- a chart with the Kalshi YES price in green and the model in blue
+The **Fight prediction** tab (`/prediction.php`) shows one entry per fight. Kalshi's two "Will X win?" markets are
+combined, and each fighter's model chance is shown next to their Kalshi price. One fight's page has:
+- a chart with both fighters: fighter A's Kalshi price in green and model in blue, fighter B's Kalshi price in sand
+  and model in violet (Kalshi = solid line, model = stepped line)
 - the breakdown of the score
 - a side-by-side fighter comparison
 - both fighters' resumes
