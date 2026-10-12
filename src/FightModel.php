@@ -14,10 +14,30 @@ declare(strict_types=1);
 final class FightModel
 {
     public const VERSION = 'v1';
+    public const DESCRIPTION = 'Resume + performance + style matchup + context, hand-set starting weights.';
 
-    private const W_RESUME = 0.35, W_PERF = 0.35, W_MATCHUP = 0.20, W_CONTEXT = 0.10;
-    private const SCALE = 1.6;
-    private const PERF_FIGHTS = 7;
+    /**
+     * Every number the algorithm uses. Saved with each prediction (model_versions.params), so a logged
+     * percentage can always be traced back to the exact formula. Change any of these → bump VERSION.
+     */
+    public const PARAMS = [
+        'weights'      => ['resume' => 0.35, 'performance' => 0.35, 'matchup' => 0.20, 'context' => 0.10],
+        'scale'        => 1.6,                       // P = 1 / (1 + e^(−scale·Δ))
+        'clamp'        => [0.03, 0.97],
+        'resume'       => [
+            'experience_fights' => 10,               // e = min(1, (W+L) / this)
+            'recency_half_life_years' => 3,          // R = 0.5^(years / this)
+            'league_weight_other' => 0.6,            // non-UFC fights
+            'method' => ['finish' => 1.25, 'split_or_majority' => 0.9, 'decision' => 1.0],
+            'title'  => ['undisputed' => 2.0, 'interim' => 1.5],
+        ],
+        'performance'  => ['fights' => 7, 'min_seconds' => 60, 'min_opponent_quality_weight' => 0.3],
+        'matchup'      => ['clamp' => 3.0, 'default_td_defense' => 0.65],
+        'context'      => [
+            'age_start' => 33, 'age_per_year' => -0.15, 'reach_per_inch' => 0.03,
+            'layoff_months' => 18, 'layoff' => -0.2, 'new_division' => -0.2,
+        ],
+    ];
 
     /** Reference spreads (standard deviations) for the z-scores. */
     private const SD = [
@@ -35,6 +55,43 @@ final class FightModel
     ];
 
     public function __construct(private PDO $db) {}
+
+    public static function paramsHash(): string
+    {
+        return substr(hash('sha256', json_encode(['params' => self::PARAMS, 'sd' => self::SD])), 0, 16);
+    }
+
+    /**
+     * Records this version's exact algorithm in model_versions (once). If VERSION was reused for different
+     * numbers, that's flagged in the log, because its old results would no longer match the formula.
+     */
+    public function registerVersion(?callable $say = null): void
+    {
+        $q = $this->db->prepare('SELECT params_hash FROM model_versions WHERE version = :v');
+        $q->execute([':v' => self::VERSION]);
+        $hash = $q->fetchColumn();
+        if ($hash === false) {
+            $this->db->prepare('INSERT INTO model_versions (version, params, params_hash, description) VALUES (:v, :p, :h, :d)')
+                ->execute([':v' => self::VERSION, ':h' => self::paramsHash(), ':d' => self::DESCRIPTION,
+                           ':p' => json_encode(['params' => self::PARAMS, 'sd' => self::SD], JSON_UNESCAPED_SLASHES)]);
+        } elseif ($hash !== self::paramsHash() && $say) {
+            $say('WARNING: FightModel::PARAMS changed but VERSION is still ' . self::VERSION . ' — bump VERSION so results stay comparable.');
+        }
+    }
+
+    /** Compact copy of what went into a prediction, for prediction logs. */
+    public static function inputs(array $res): array
+    {
+        $side = fn(array $f) => [
+            'name' => $f['name'], 'record' => $f['record'], 'age' => $f['age'], 'reach_in' => $f['reach_in'],
+            'fights' => $f['fights'], 'ufc_fights' => $f['ufc_fights'], 'other_fights' => $f['other_fights'],
+            'perf_fights' => $f['perf_fights'], 'resume' => $f['resume'], 'approx_records' => $f['approx_records'],
+            'style' => $f['style'], 'layoff_months' => $f['layoff_months'], 'complete' => $f['complete'],
+            'perf' => array_map(fn($v) => $v === null ? null : round($v, 4), $f['perf']), 'context' => $f['context'],
+        ];
+        return ['version' => self::VERSION, 'params_hash' => self::paramsHash(), 'a' => $side($res['a']), 'b' => $side($res['b']),
+                'parts' => $res['parts'], 'notes' => $res['notes']];
+    }
 
     /**
      * Prediction for one Kalshi market ("Will <fighter> win?"), or null with a reason.
@@ -91,22 +148,24 @@ final class FightModel
             $matchup += $edges['striking'] / self::SD['edge_strike'];
         }
         if (isset($a['perf']['td_att15'], $b['perf']['td_att15'])) {
-            $edges['grappling'] = $a['perf']['td_att15'] * (1 - ($b['perf']['td_def'] ?? 0.65))
-                                - $b['perf']['td_att15'] * (1 - ($a['perf']['td_def'] ?? 0.65));
+            $tdDef = self::PARAMS['matchup']['default_td_defense'];
+            $edges['grappling'] = $a['perf']['td_att15'] * (1 - ($b['perf']['td_def'] ?? $tdDef))
+                                - $b['perf']['td_att15'] * (1 - ($a['perf']['td_def'] ?? $tdDef));
             $matchup += $edges['grappling'] / self::SD['edge_grapple'];
         }
-        $matchup = max(-3.0, min(3.0, $matchup));
+        $matchup = max(-self::PARAMS['matchup']['clamp'], min(self::PARAMS['matchup']['clamp'], $matchup));
 
         // 4. Context (reach counts only when ESPN has both)
         if ($a['reach_in'] !== null && $b['reach_in'] !== null) {
-            $a['context']['reach'] = round(0.03 * ($a['reach_in'] - $b['reach_in']), 3);
+            $a['context']['reach'] = round(self::PARAMS['context']['reach_per_inch'] * ($a['reach_in'] - $b['reach_in']), 3);
             $a['context']['total'] = round($a['context']['total'] + $a['context']['reach'], 3);
         }
         $context = $a['context']['total'] - $b['context']['total'];
 
-        $delta = self::W_RESUME * $resume + self::W_PERF * $perf + self::W_MATCHUP * $matchup + self::W_CONTEXT * $context;
-        $p     = 1 / (1 + exp(-self::SCALE * $delta));
-        $p     = max(0.03, min(0.97, $p));
+        $w     = self::PARAMS['weights'];
+        $delta = $w['resume'] * $resume + $w['performance'] * $perf + $w['matchup'] * $matchup + $w['context'] * $context;
+        $p     = 1 / (1 + exp(-self::PARAMS['scale'] * $delta));
+        $p     = max(self::PARAMS['clamp'][0], min(self::PARAMS['clamp'][1], $p));
 
         $notes = [];
         foreach (['a' => $a, 'b' => $b] as $side => $f) {
@@ -134,10 +193,10 @@ final class FightModel
             'p'     => round($p, 4),
             'delta' => round($delta, 4),
             'parts' => [
-                'resume'      => ['value' => round($resume, 3),  'weight' => self::W_RESUME],
-                'performance' => ['value' => round($perf, 3),    'weight' => self::W_PERF, 'stats' => array_map(fn($v) => round($v, 3), $perfParts)],
-                'matchup'     => ['value' => round($matchup, 3), 'weight' => self::W_MATCHUP, 'edges' => array_map(fn($v) => round($v, 3), $edges)],
-                'context'     => ['value' => round($context, 3), 'weight' => self::W_CONTEXT],
+                'resume'      => ['value' => round($resume, 3),  'weight' => $w['resume']],
+                'performance' => ['value' => round($perf, 3),    'weight' => $w['performance'], 'stats' => array_map(fn($v) => round($v, 3), $perfParts)],
+                'matchup'     => ['value' => round($matchup, 3), 'weight' => $w['matchup'], 'edges' => array_map(fn($v) => round($v, 3), $edges)],
+                'context'     => ['value' => round($context, 3), 'weight' => $w['context']],
             ],
             'a'     => $a,
             'b'     => $b,
@@ -188,12 +247,13 @@ final class FightModel
                 $approx++;
                 $w = (int) $r['opp_cur_w']; $l = (int) $r['opp_cur_l'];
             }
+            $P   = self::PARAMS['resume'];
             $q   = ($w + 1) / ($w + $l + 2);
-            $e   = min(1.0, ($w + $l) / 10);
-            $rec = 0.5 ** (self::years($r['fight_date'], $asOf) / 3);
-            $lg  = ($r['league'] ?? 'ufc') === 'ufc' ? 1.0 : 0.6;
+            $e   = min(1.0, ($w + $l) / $P['experience_fights']);
+            $rec = 0.5 ** (self::years($r['fight_date'], $asOf) / $P['recency_half_life_years']);
+            $lg  = ($r['league'] ?? 'ufc') === 'ufc' ? 1.0 : $P['league_weight_other'];
             $m   = self::methodMultiplier((string) $r['method']);
-            $t   = !self::truthy($r['is_title']) ? 1.0 : ($r['title_type'] === 'interim' ? 1.5 : 2.0);
+            $t   = !self::truthy($r['is_title']) ? 1.0 : ($r['title_type'] === 'interim' ? $P['title']['interim'] : $P['title']['undisputed']);
             $pts = match ($r['result']) {
                 'W'     => $q * $e * $m * $t * $rec * $lg,
                 'L'     => -(1 - $q) * $rec * $lg,
@@ -224,9 +284,9 @@ final class FightModel
           LEFT JOIN fight_participants ow ON ow.fight_id = fp.fight_id AND ow.fighter_id = fp.opponent_id
           LEFT JOIN fighters o ON o.id = fp.opponent_id
               WHERE fp.fighter_id = :id AND fi.status_state = 'post' AND fi.fight_date < :asof
-                AND COALESCE(fi.duration_seconds, CASE WHEN fi.method LIKE 'Decision%' THEN fi.scheduled_rounds * 300 END) >= 60
+                AND COALESCE(fi.duration_seconds, CASE WHEN fi.method LIKE 'Decision%' THEN fi.scheduled_rounds * 300 END) >= " . (int) self::PARAMS['performance']['min_seconds'] . "
               ORDER BY fi.fight_date DESC
-              LIMIT " . self::PERF_FIGHTS
+              LIMIT " . (int) self::PARAMS['performance']['fights']
         );
         $stmt->execute([':id' => $fighterId, ':asof' => $asOf->format('c')]);
         $statRows = $stmt->fetchAll();
@@ -245,7 +305,8 @@ final class FightModel
             $w0  = $s['opp_w'] !== null ? (int) $s['opp_w'] : (int) $s['opp_cur_w'];
             $l0  = $s['opp_l'] !== null ? (int) $s['opp_l'] : (int) $s['opp_cur_l'];
             $q   = ($w0 + 1) / ($w0 + $l0 + 2);
-            $wt  = (0.5 ** (self::years($s['fight_date'], $asOf) / 3)) * max(0.3, $q);
+            $wt  = (0.5 ** (self::years($s['fight_date'], $asOf) / self::PARAMS['resume']['recency_half_life_years']))
+                 * max(self::PARAMS['performance']['min_opponent_quality_weight'], $q);
 
             $add('sig_diff', ($s['sl'] - $s['o_sl']) / $min, $wt);
             $add('sig_att_pm', $s['sa'] / $min, $wt);
@@ -283,11 +344,12 @@ final class FightModel
         $layoff  = $last ? self::years($last['fight_date'], $asOf) * 12 : null;   // months
         $newDiv  = $upcomingClass && $last && $last['weight_class']
             && !preg_match('/' . preg_quote(self::division((string) $upcomingClass), '/') . '/i', (string) $last['weight_class']);
+        $C   = self::PARAMS['context'];
         $ctx = [
-            'age'      => $age !== null ? -0.15 * max(0, $age - 33) : 0.0,
+            'age'      => $age !== null ? $C['age_per_year'] * max(0, $age - $C['age_start']) : 0.0,
             'reach'    => 0.0,   // set in predictMarket(), only when both reaches are known
-            'layoff'   => $layoff !== null && $layoff > 18 ? -0.2 : 0.0,
-            'division' => $newDiv ? -0.2 : 0.0,
+            'layoff'   => $layoff !== null && $layoff > $C['layoff_months'] ? $C['layoff'] : 0.0,
+            'division' => $newDiv ? $C['new_division'] : 0.0,
         ];
         $ctx['total'] = array_sum($ctx);
 
@@ -320,6 +382,7 @@ final class FightModel
      */
     public function predictAll(?int $syncRunId = null, ?callable $say = null): int
     {
+        $this->registerVersion($say);
         $rows = $this->db->query(
             "SELECT mf.market_id, mf.fighter_id, mf.opponent_id,
                     (SELECT yes_price FROM market_snapshots s WHERE s.market_id = mf.market_id ORDER BY captured_at DESC LIMIT 1) AS yes_price
@@ -332,8 +395,8 @@ final class FightModel
         );
         $ins = $this->db->prepare(
             'INSERT INTO predictions (market_id, fighter_id, opponent_id, sync_run_id, model_version, win_probability, kalshi_yes_price,
-                                      resume_score, performance_score, matchup_score, context_score, delta, components)
-             VALUES (:m, :f, :o, :run, :v, :p, :k, :rs, :ps, :ms, :cs, :d, :c)'
+                                      resume_score, performance_score, matchup_score, context_score, delta, components, inputs)
+             VALUES (:m, :f, :o, :run, :v, :p, :k, :rs, :ps, :ms, :cs, :d, :c, :in)'
         );
         $saved = 0;
         foreach ($rows as $r) {
@@ -356,6 +419,7 @@ final class FightModel
                     'style' => [$res['a']['style'], $res['b']['style']],
                     'resume' => [$res['a']['resume'], $res['b']['resume']],
                 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                ':in' => json_encode(self::inputs($res), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             ]);
             $saved++;
         }
@@ -370,10 +434,11 @@ final class FightModel
     public static function methodMultiplier(string $method): float
     {
         $m = strtolower($method);
+        $M = self::PARAMS['resume']['method'];
         return match (true) {
-            str_contains($m, 'ko') || str_contains($m, 'submission') => 1.25,
-            str_contains($m, 'split') || str_contains($m, 'majority') => 0.9,
-            default => 1.0,
+            str_contains($m, 'ko') || str_contains($m, 'submission') => $M['finish'],
+            str_contains($m, 'split') || str_contains($m, 'majority') => $M['split_or_majority'],
+            default => $M['decision'],
         };
     }
 

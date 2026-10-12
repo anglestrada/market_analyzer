@@ -526,4 +526,82 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS predictions_market_time_idx ON predictions (market_id, created_at DESC);
 
+-- =====================================================================
+-- Model scoring: what the model said before each fight vs. who actually won
+-- =====================================================================
+
+-- The exact algorithm behind each model version (FightModel::PARAMS: weights, multipliers, cut-offs).
+CREATE TABLE IF NOT EXISTS model_versions (
+    version        TEXT        PRIMARY KEY,
+    params         JSONB       NOT NULL,
+    params_hash    TEXT        NOT NULL,
+    description    TEXT,
+    first_used_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Both fighters' inputs at prediction time (resume, stats, context), so any number can be explained later.
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS inputs JSONB;
+
+-- One row per finished fight per model version: the last prediction before the fight, the Kalshi price at the
+-- same moment, the result, and the scores. "Fighter A" = the first linked Kalshi market of the fight.
+-- source: live     = a prediction the app actually saved before the fight
+--         backtest = computed afterwards with data from before the fight (used to score new versions)
+CREATE TABLE IF NOT EXISTS prediction_results (
+    id                 BIGSERIAL PRIMARY KEY,
+    event_id           BIGINT        NOT NULL REFERENCES events (id)   ON DELETE CASCADE,
+    market_id          BIGINT        NOT NULL REFERENCES markets (id)  ON DELETE CASCADE,
+    fighter_id         BIGINT                 REFERENCES fighters (id) ON DELETE SET NULL,
+    opponent_id        BIGINT                 REFERENCES fighters (id) ON DELETE SET NULL,
+    model_version      TEXT          NOT NULL,
+    source             TEXT          NOT NULL CHECK (source IN ('live', 'backtest')),
+    prediction_id      BIGINT                 REFERENCES predictions (id) ON DELETE SET NULL,
+    predicted_at       TIMESTAMPTZ,
+    cutoff_at          TIMESTAMPTZ   NOT NULL,                 -- fight start; nothing after this is used
+    cutoff_source      TEXT          NOT NULL CHECK (cutoff_source IN ('espn', 'kalshi_event')),
+    model_p            NUMERIC(6,4)  NOT NULL CHECK (model_p BETWEEN 0 AND 1),   -- fighter A's chance
+    kalshi_p           NUMERIC(6,4)  CHECK (kalshi_p BETWEEN 0 AND 1),           -- A's YES / (A YES + B YES)
+    kalshi_p_raw       NUMERIC(6,4)  CHECK (kalshi_p_raw BETWEEN 0 AND 1),       -- A's YES price as-is
+    outcome            SMALLINT      CHECK (outcome IN (0, 1)),                  -- 1 = A won; NULL = draw / NC
+    result_type        TEXT          NOT NULL CHECK (result_type IN ('win', 'loss', 'draw', 'no_contest')),
+    outcome_source     TEXT          NOT NULL CHECK (outcome_source IN ('kalshi', 'espn')),
+    method             TEXT,
+    end_round          SMALLINT,
+    model_brier        NUMERIC(8,5),   -- (p − outcome)²: 0 perfect, 0.25 coin flip, lower is better
+    model_logloss      NUMERIC(8,5),   -- −ln(chance given to the winner): lower is better
+    model_correct      NUMERIC(2,1),   -- 1 picked the winner, 0 didn't, 0.5 exactly 50%
+    kalshi_brier       NUMERIC(8,5),
+    kalshi_logloss     NUMERIC(8,5),
+    kalshi_correct     NUMERIC(2,1),
+    resume_score       NUMERIC(8,4),   -- the four parts (A minus B), to see which ones help
+    performance_score  NUMERIC(8,4),
+    matchup_score      NUMERIC(8,4),
+    context_score      NUMERIC(8,4),
+    delta              NUMERIC(8,4),
+    inputs             JSONB,
+    resolved_at        TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    UNIQUE (event_id, model_version, source)
+);
+CREATE INDEX IF NOT EXISTS prediction_results_version_idx ON prediction_results (model_version, source, cutoff_at);
+
+-- Scorecard per model version: SELECT * FROM model_scorecard;
+CREATE OR REPLACE VIEW model_scorecard AS
+SELECT model_version,
+       source,
+       COUNT(*) FILTER (WHERE outcome IS NOT NULL)                       AS fights,
+       COUNT(*) FILTER (WHERE outcome IS NULL)                           AS draws_or_nc,
+       ROUND(AVG(model_correct) * 100, 1)                                AS model_accuracy_pct,
+       ROUND(AVG(model_brier), 4)                                        AS model_brier,
+       ROUND(AVG(model_logloss), 4)                                      AS model_logloss,
+       COUNT(kalshi_brier)                                               AS fights_with_kalshi,
+       ROUND(AVG(kalshi_correct) * 100, 1)                               AS kalshi_accuracy_pct,
+       ROUND(AVG(kalshi_brier), 4)                                       AS kalshi_brier,
+       ROUND(AVG(kalshi_logloss), 4)                                     AS kalshi_logloss,
+       -- same fights only: > 0 means the model beat Kalshi's pre-fight price
+       ROUND(1 - AVG(model_brier) FILTER (WHERE kalshi_brier IS NOT NULL)
+               / NULLIF(AVG(kalshi_brier), 0), 3)                        AS brier_skill_vs_kalshi,
+       MIN(cutoff_at)                                                    AS first_fight,
+       MAX(cutoff_at)                                                    AS last_fight
+  FROM prediction_results
+ GROUP BY model_version, source;
+
 COMMIT;
