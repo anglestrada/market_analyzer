@@ -548,12 +548,12 @@ ALTER TABLE predictions ADD COLUMN IF NOT EXISTS inputs JSONB;
 --         backtest = computed afterwards with data from before the fight (used to score new versions)
 CREATE TABLE IF NOT EXISTS prediction_results (
     id                 BIGSERIAL PRIMARY KEY,
-    event_id           BIGINT        NOT NULL REFERENCES events (id)   ON DELETE CASCADE,
-    market_id          BIGINT        NOT NULL REFERENCES markets (id)  ON DELETE CASCADE,
+    event_id           BIGINT                 REFERENCES events (id)   ON DELETE CASCADE,   -- NULL for history rows
+    market_id          BIGINT                 REFERENCES markets (id)  ON DELETE CASCADE,
     fighter_id         BIGINT                 REFERENCES fighters (id) ON DELETE SET NULL,
     opponent_id        BIGINT                 REFERENCES fighters (id) ON DELETE SET NULL,
     model_version      TEXT          NOT NULL,
-    source             TEXT          NOT NULL CHECK (source IN ('live', 'backtest')),
+    source             TEXT          NOT NULL CHECK (source IN ('live', 'backtest', 'history')),
     prediction_id      BIGINT                 REFERENCES predictions (id) ON DELETE SET NULL,
     predicted_at       TIMESTAMPTZ,
     cutoff_at          TIMESTAMPTZ   NOT NULL,                 -- fight start; nothing after this is used
@@ -603,5 +603,20 @@ SELECT model_version,
        MAX(cutoff_at)                                                    AS last_fight
   FROM prediction_results
  GROUP BY model_version, source;
+
+-- ---------------------------------------------------------------------
+-- Model v2: Elo rating + age-gap parts, and "history" backtests on past UFC fights (no Kalshi market needed)
+-- history = every model version scored on stored past UFC fights between two fully-synced fighters
+-- ---------------------------------------------------------------------
+ALTER TABLE predictions        ADD COLUMN IF NOT EXISTS rating_score NUMERIC(8,4);
+ALTER TABLE predictions        ADD COLUMN IF NOT EXISTS age_score    NUMERIC(8,4);
+ALTER TABLE prediction_results ADD COLUMN IF NOT EXISTS rating_score NUMERIC(8,4);
+ALTER TABLE prediction_results ADD COLUMN IF NOT EXISTS age_score    NUMERIC(8,4);
+ALTER TABLE prediction_results ADD COLUMN IF NOT EXISTS fight_id     BIGINT REFERENCES fights (id) ON DELETE CASCADE;
+ALTER TABLE prediction_results ALTER COLUMN event_id  DROP NOT NULL;
+ALTER TABLE prediction_results ALTER COLUMN market_id DROP NOT NULL;
+ALTER TABLE prediction_results DROP CONSTRAINT IF EXISTS prediction_results_source_check;
+ALTER TABLE prediction_results ADD CONSTRAINT prediction_results_source_check CHECK (source IN ('live', 'backtest', 'history'));
+CREATE UNIQUE INDEX IF NOT EXISTS prediction_results_history_uq ON prediction_results (fight_id, model_version) WHERE source = 'history';
 
 COMMIT;

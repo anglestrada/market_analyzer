@@ -200,6 +200,30 @@ Quick view in psql: `SELECT * FROM model_scorecard;`. The same scorecard is show
 Backtest caveat: a fighter's *current* record is still used when an opponent's record on the day is unknown, so
 backtests can be slightly optimistic. Trust `live` most.
 
+## Model versions (v1, v2, …)
+
+Every version runs side by side: each one saves its own predictions, is scored on the same fights, and has its
+own tab on the fight page (v1 by default). The list shows one column per version. A version's numbers never
+change once it's in use. Improvements go into a new version, so results stay comparable.
+
+| Version | What it adds |
+|---|---|
+| **v1** | Resume + performance + style matchup + context, hand-set weights |
+| **v2** | v1 plus: an **Elo rating** replayed through every stored fight (finishes and title fights move it more; fighters first seen mid-career start from their record on that day), an **age-gap** part (each year younger is worth +0.06 on the log-odds), **small samples pulled toward the division average** (`(n·fighter + 3·average) / (n + 3)`), and a penalty for **KO losses in the last 3 years**. Weights are on the log-odds directly (`scale` 1). |
+
+**Scoring more fights now.** `history` backtests score every version on past UFC fights we've already stored. This
+needs both fighters' full histories:
+
+```bash
+php bin/fighters_sync.php --deep        # also every UFC opponent's full history (several times more ESPN requests, once)
+php bin/model_report.php --history      # score v1, v2… on those past fights + the usual report
+php bin/model_fit.php --version=v2      # fit v2's weights to the results (cross-validated)
+```
+
+**Making v3:** run `model_report.php --history` and `model_fit.php`, and paste both "PASTE THIS" blocks into the chat.
+v3 is then added to `FightModel::VERSIONS`, with whatever works from v1 and v2 and the fitted weights. It gets its
+own tab, column and scorecard row automatically.
+
 ## Notes
 
 - TheNewsAPI's free plan returns 3 articles per request and has a daily request limit. Each drop uses 1–3

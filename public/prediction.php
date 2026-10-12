@@ -36,11 +36,16 @@ if ($marketId > 0 && $eventId <= 0) {
  * List of open fights
  * ================================================================== */
 if ($eventId <= 0) {
+    $versions = FightModel::versions();
+    $vcols = '';
+    foreach ($versions as $i => $v) {   // latest prediction per version (versions are code constants, safe to inline)
+        $vcols .= ",\n                (SELECT win_probability FROM predictions p WHERE p.market_id = m.id AND p.model_version = '$v'
+                  ORDER BY created_at DESC LIMIT 1) AS model_$i";
+    }
     $rows = db()->query(
         "SELECT m.id, m.event_id, m.yes_subtitle, m.market_title, e.event_title, e.event_start_time, mf.fighter_id,
                 (SELECT yes_price FROM market_snapshots s WHERE s.market_id = m.id ORDER BY captured_at DESC LIMIT 1) AS kalshi,
-                (SELECT win_probability FROM predictions p WHERE p.market_id = m.id ORDER BY created_at DESC LIMIT 1) AS model,
-                (SELECT created_at FROM predictions p WHERE p.market_id = m.id ORDER BY created_at DESC LIMIT 1) AS model_at
+                (SELECT created_at FROM predictions p WHERE p.market_id = m.id ORDER BY created_at DESC LIMIT 1) AS model_at$vcols
            FROM markets m
            JOIN events e ON e.id = m.event_id
       LEFT JOIN market_fighters mf ON mf.market_id = m.id
@@ -61,9 +66,13 @@ if ($eventId <= 0) {
         $f['b'] = $s1 ? ($s1['yes_subtitle'] ?: $s1['market_title']) : null;
         $f['ka'] = $s0['kalshi'] !== null ? (float) $s0['kalshi'] : null;
         $f['kb'] = $s1 && $s1['kalshi'] !== null ? (float) $s1['kalshi'] : ($f['ka'] !== null ? 1 - $f['ka'] : null);
-        // The model is one number per fight: take whichever side has one, the other side is 1 − p.
-        $f['ma'] = $s0['model'] !== null ? (float) $s0['model'] : ($s1 && $s1['model'] !== null ? 1 - (float) $s1['model'] : null);
-        $f['mb'] = $f['ma'] !== null ? 1 - $f['ma'] : null;
+        // Each version is one number per fight: take whichever side has one, the other side is 1 − p.
+        foreach ($versions as $i => $v) {
+            $c = "model_$i";
+            $ma = $s0[$c] !== null ? (float) $s0[$c] : ($s1 && $s1[$c] !== null ? 1 - (float) $s1[$c] : null);
+            $f['m'][$v] = [$ma, $ma !== null ? 1 - $ma : null];
+        }
+        [$f['ma'], $f['mb']] = $f['m'][FightModel::DEFAULT_VERSION];
         $f['at'] = max((string) $s0['model_at'], (string) ($s1['model_at'] ?? '')) ?: null;
         $f['linked'] = (bool) ($s0['fighter_id'] || ($s1['fighter_id'] ?? null));
     }
@@ -115,14 +124,15 @@ if ($eventId <= 0) {
     <section class="card">
         <div class="table-wrap">
         <table class="table fights-table">
-            <thead><tr><th>Fight</th><th>Fighter</th><th class="num">Model</th><th class="num">Kalshi</th><th class="num">Gap</th><th>Updated</th></tr></thead>
+            <thead><tr><th>Fight</th><th>Fighter</th><?php foreach ($versions as $v): ?><th class="num">Model <?= e($v) ?></th><?php endforeach; ?>
+                <th class="num">Kalshi</th><th class="num" title="<?= e(FightModel::DEFAULT_VERSION) ?> minus Kalshi">Gap</th><th>Updated</th></tr></thead>
             <tbody>
             <?php foreach ($fights as $id => $f): $href = url('/prediction.php', ['event' => $id]); ?>
                 <tr class="fight-a">
                     <td rowspan="<?= $f['b'] ? 2 : 1 ?>"><a href="<?= e($href) ?>"><b><?= e($f['a']) ?><?= $f['b'] ? ' vs ' . e($f['b']) : '' ?></b></a>
                         <span class="cell-sub"><?= e($f['event']['event_title']) ?><?= $f['event']['event_start_time'] ? ' · ' . e(fmt_time($f['event']['event_start_time'], 'M j, g:i A')) : '' ?></span></td>
                     <td><span class="dot dot-a"></span><?= e($f['a']) ?></td>
-                    <td class="num" data-value="<?= $f['ma'] ?? -1 ?>"><b class="model-a"><?= $pct($f['ma']) ?></b></td>
+                    <?php foreach ($versions as $v): ?><td class="num"><b class="model-a"><?= $pct($f['m'][$v][0]) ?></b></td><?php endforeach; ?>
                     <td class="num" data-value="<?= $f['ka'] ?? -1 ?>"><b class="kalshi-a"><?= $pct($f['ka']) ?></b></td>
                     <td class="num"><?= $gapHtml($f['ma'], $f['ka']) ?></td>
                     <td rowspan="<?= $f['b'] ? 2 : 1 ?>" class="small"><?= $f['at'] ? reltime($f['at']) : '<span class="muted">' . ($f['linked'] ? 'syncing' : 'not matched') . '</span>' ?></td>
@@ -130,7 +140,7 @@ if ($eventId <= 0) {
                 <?php if ($f['b']): ?>
                 <tr class="fight-b">
                     <td><span class="dot dot-b"></span><?= e($f['b']) ?></td>
-                    <td class="num"><b class="model-b"><?= $pct($f['mb']) ?></b></td>
+                    <?php foreach ($versions as $v): ?><td class="num"><b class="model-b"><?= $pct($f['m'][$v][1]) ?></b></td><?php endforeach; ?>
                     <td class="num"><b class="kalshi-b"><?= $pct($f['kb']) ?></b></td>
                     <td class="num"><?= $gapHtml($f['mb'], $f['kb']) ?></td>
                 </tr>
@@ -230,15 +240,15 @@ $kalshiSeries = function (int $id) use ($from): array {
     }
     return $out;
 };
-$modelSeries = function (int $id, ?float $live, ?string $startX) use ($from, $now): array {
+$modelSeries = function (int $id, string $version, ?float $live, ?string $startX) use ($from, $now): array {
     $q = db()->prepare('SELECT created_at, win_probability FROM predictions
                          WHERE market_id = :m AND model_version = :v AND created_at >= :from ORDER BY created_at');
-    $q->execute([':m' => $id, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
+    $q->execute([':m' => $id, ':v' => $version, ':from' => $from->format('c')]);
     $out = array_map(fn($r) => ['x' => iso($r['created_at']), 'y' => round((float) $r['win_probability'] * 100, 2)], $q->fetchAll());
     // Start at the edge of the range with the value the model had then.
     $q = db()->prepare('SELECT win_probability FROM predictions WHERE market_id = :m AND model_version = :v AND created_at < :from
                          ORDER BY created_at DESC LIMIT 1');
-    $q->execute([':m' => $id, ':v' => FightModel::VERSION, ':from' => $from->format('c')]);
+    $q->execute([':m' => $id, ':v' => $version, ':from' => $from->format('c')]);
     if (($before = $q->fetchColumn()) !== false && $before !== null) {
         array_unshift($out, ['x' => $startX ?? iso($from->format('c')), 'y' => round((float) $before * 100, 2)]);
     }
@@ -252,17 +262,24 @@ $flip = fn(array $series) => array_map(fn($pt) => ['x' => $pt['x'], 'y' => round
 
 $kSeriesA = $kalshiSeries($aId);
 $kSeriesB = $bId !== null ? $kalshiSeries($bId) : $flip($kSeriesA);
-$mSeriesA = $modelSeries($aId, $p, $kSeriesA[0]['x'] ?? null);
-$mSeriesB = $flip($mSeriesA);   // the model's two chances always add up to 100%
-
-// Fighter A: green Kalshi / blue model. Fighter B: sand Kalshi / violet model. Kalshi = solid line, model = stepped + dots.
-$lines = [
-    ['label' => "$nameA · Kalshi", 'kind' => 'kalshi', 'color' => '#7ccba6', 'data' => $kSeriesA],
-    ['label' => "$nameA · Model",  'kind' => 'model',  'color' => '#8fb4d6', 'data' => $mSeriesA],
-    ['label' => "$nameB · Kalshi", 'kind' => 'kalshi', 'color' => '#d9b382', 'data' => $kSeriesB],
-    ['label' => "$nameB · Model",  'kind' => 'model',  'color' => '#b4a7d6', 'data' => $mSeriesB],
-];
-$hasChart = (bool) array_filter($lines, fn($l) => $l['data']);
+// One tab per model version (v1, v2, …); each has its own numbers, chart and breakdown. Default: v1.
+$versions = FightModel::versions();
+$tab      = in_array($_GET['v'] ?? '', $versions, true) ? $_GET['v'] : FightModel::DEFAULT_VERSION;
+$panels   = [];
+foreach ($versions as $v) {
+    $vr = $v === FightModel::DEFAULT_VERSION ? $res : (new FightModel(db(), $v))->predictMarket($aId);
+    $vp = $vr['ok'] ? (float) $vr['p'] : null;
+    $mSeriesA = $modelSeries($aId, $v, $vp, $kSeriesA[0]['x'] ?? null);
+    $mSeriesB = $flip($mSeriesA);   // the model's two chances always add up to 100%
+    // Fighter A: green Kalshi / blue model. Fighter B: sand Kalshi / violet model. Kalshi = solid, model = stepped + dots.
+    $vlines = [
+        ['label' => "$nameA · Kalshi", 'kind' => 'kalshi', 'color' => '#7ccba6', 'data' => $kSeriesA],
+        ['label' => "$nameA · Model $v",  'kind' => 'model',  'color' => '#8fb4d6', 'data' => $mSeriesA],
+        ['label' => "$nameB · Kalshi", 'kind' => 'kalshi', 'color' => '#d9b382', 'data' => $kSeriesB],
+        ['label' => "$nameB · Model $v",  'kind' => 'model',  'color' => '#b4a7d6', 'data' => $mSeriesB],
+    ];
+    $panels[$v] = ['res' => $vr, 'p' => $vp, 'lines' => $vlines, 'hasChart' => (bool) array_filter($vlines, fn($l) => $l['data'])];
+}
 
 log_activity('market_view', null, $aId, ['source' => 'prediction', 'range' => $range]);
 page_header('Prediction · ' . $nameA . ' vs ' . $nameB, $user, ['nav' => 'prediction']);
@@ -291,7 +308,7 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 
 <div class="page-head">
     <div>
-        <p class="eyebrow">Personal model · <?= e(FightModel::VERSION) ?></p>
+        <p class="eyebrow">Personal model</p>
         <h1><?= e($nameA) ?> <span class="muted">vs</span> <?= e($nameB) ?></h1>
         <div class="meta">
             <?= badge($primary['status']) ?>
@@ -305,6 +322,19 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
     </div>
 </div>
 
+<nav class="vtabs" role="tablist" aria-label="Model version">
+    <?php foreach ($panels as $v => $pn): ?>
+        <button type="button" role="tab" data-vtab="<?= e($v) ?>" aria-selected="<?= $v === $tab ? 'true' : 'false' ?>"
+                title="<?= e(FightModel::VERSIONS[$v]['description']) ?>">
+            Model <?= e($v) ?><?php if ($pn['p'] !== null): ?> <span class="vtab-p"><?= $pct($pn['p']) ?></span><?php endif; ?>
+        </button>
+    <?php endforeach; ?>
+    <span class="vtab-note muted small" data-vtab-desc><?= e(FightModel::VERSIONS[$tab]['description']) ?></span>
+</nav>
+
+<?php foreach ($panels as $v => $pn):
+    $res = $pn['res']; $p = $pn['p']; $lines = $pn['lines']; $hasChart = $pn['hasChart']; ?>
+<div class="vpanel" role="tabpanel" data-vpanel="<?= e($v) ?>" data-desc="<?= e(FightModel::VERSIONS[$v]['description']) ?>"<?= $v === $tab ? '' : ' hidden' ?>>
 <?php if (!$res['ok']): [$t, $txt] = $reasonText[$res['reason']] ?? ['Prediction unavailable', e($res['reason'])]; ?>
     <section class="card"><div class="news-status"><b><?= e($t) ?></b><p><?= $txt ?></p></div></section>
 <?php endif; ?>
@@ -316,10 +346,10 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 
 <section class="card">
     <div class="card-head wrap">
-        <h2>Win chance over time</h2>
+        <h2>Win chance over time · model <?= e($v) ?></h2>
         <div class="range">
             <?php foreach (array_keys($ranges) as $key): ?>
-                <a class="pill<?= $range === $key ? ' active' : '' ?>" href="<?= e(url('/prediction.php', ['event' => $eventId, 'market' => $aId, 'range' => $key])) ?>"><?= e($key) ?></a>
+                <a class="pill<?= $range === $key ? ' active' : '' ?>" href="<?= e(url('/prediction.php', ['event' => $eventId, 'market' => $aId, 'range' => $key, 'v' => $v])) ?>"><?= e($key) ?></a>
             <?php endforeach; ?>
         </div>
     </div>
@@ -329,8 +359,8 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
         <?php endforeach; ?>
         <span><i class="swatch swatch-even"></i>50%</span>
     </div>
-    <div class="chart-box h-320"><canvas data-chart="prediction" data-source="d-pred" data-empty="No price or prediction history in this period yet."></canvas></div>
-    <?= json_script('d-pred', $hasChart ? ['lines' => $lines] : null) ?>
+    <div class="chart-box h-320"><canvas data-chart="prediction" data-source="d-pred-<?= e($v) ?>" data-empty="No price or prediction history in this period yet."></canvas></div>
+    <?= json_script('d-pred-' . $v, $hasChart ? ['lines' => $lines] : null) ?>
     <p class="hint">Solid lines are Kalshi's YES price for each fighter; stepped lines are the model. The model saves a point whenever its number moves by 0.5 pp or more (and at least every 6 hours).</p>
 </section>
 
@@ -338,8 +368,11 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
     $a = $res['a'];
     $b = $res['b'];
     $parts = $res['parts'];
-    $labels = ['resume' => 'Resume (who they beat, how, and how recently)', 'performance' => 'Performance (fight stats)',
-               'matchup' => 'Style matchup (offense vs. the other\'s defense)', 'context' => 'Context (age, reach, layoff, division)'];
+    $vscale = (float) FightModel::VERSIONS[$v]['params']['scale'];
+    $labels = [];
+    foreach ($parts as $k => $pt) {
+        $labels[$k] = $k === 'context' && !isset($parts['age']) ? 'Context (age, reach, layoff, division)' : (FightModel::PART_LABELS[$k] ?? $k);
+    }
 ?>
 <div class="grid grid-2">
     <section class="card">
@@ -347,16 +380,16 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
         <table class="table pred-parts">
             <thead><tr><th>Part</th><th class="num">Score</th><th class="num">Weight</th><th class="num">Effect</th></tr></thead>
             <tbody>
-            <?php foreach ($labels as $k => $label): $v = (float) $parts[$k]['value']; $eff = $v * $parts[$k]['weight']; ?>
+            <?php foreach ($labels as $k => $label): $val = (float) $parts[$k]['value']; $eff = $val * $parts[$k]['weight']; ?>
                 <tr>
                     <td><?= e($label) ?>
-                        <div class="delta-bar"><span class="<?= $v >= 0 ? 'pos' : 'neg' ?>" style="width:<?= min(50, abs($v) * 16) ?>%"></span></div></td>
-                    <td class="num"><?= e(sprintf('%+.2f', $v)) ?></td>
+                        <div class="delta-bar"><span class="<?= $val >= 0 ? 'pos' : 'neg' ?>" style="width:<?= min(50, abs($val) * 16) ?>%"></span></div></td>
+                    <td class="num"><?= e(sprintf('%+.2f', $val)) ?></td>
                     <td class="num"><?= e((string) $parts[$k]['weight']) ?></td>
-                    <td class="num"><b><?= e(sprintf('%+.2f', $eff)) ?></b></td>
+                    <td class="num"><b><?= e(sprintf('%+.2f', $eff * $vscale)) ?></b></td>
                 </tr>
             <?php endforeach; ?>
-            <tr><td><b>Total (Δ)</b></td><td></td><td></td><td class="num"><b><?= e(sprintf('%+.2f', $res['delta'])) ?></b></td></tr>
+            <tr><td><b>Total</b> <span class="muted small">(log-odds: +1 ≈ 73%, +2 ≈ 88%)</span></td><td></td><td></td><td class="num"><b><?= e(sprintf('%+.2f', $res['delta'] * $vscale)) ?></b></td></tr>
             </tbody>
         </table>
         <?php if (!empty($parts['performance']['stats'])): ?>
@@ -383,13 +416,14 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
             'Stance'                  => [$a['stance'] ?? '—', $b['stance'] ?? '—'],
             'Style (from stats)'      => [$a['style'] ?? '—', $b['style'] ?? '—'],
             'Resume score'            => [$fmtNum($a['resume']), $fmtNum($b['resume'])],
-            'Sig. strikes landed − absorbed / min' => [$fmtNum($a['perf']['sig_diff'] ?? null), $fmtNum($b['perf']['sig_diff'] ?? null)],
-            'Striking defense'        => [$fmtPct($a['perf']['str_def'] ?? null), $fmtPct($b['perf']['str_def'] ?? null)],
-            'Takedowns / 15 min'      => [$fmtNum($a['perf']['td15'] ?? null), $fmtNum($b['perf']['td15'] ?? null)],
-            'Takedown defense'        => [$fmtPct($a['perf']['td_def'] ?? null), $fmtPct($b['perf']['td_def'] ?? null)],
-            'Control time'            => [$fmtPct($a['perf']['ctrl'] ?? null), $fmtPct($b['perf']['ctrl'] ?? null)],
-            'Knockdowns / 15 min'     => [$fmtNum($a['perf']['kd15'] ?? null), $fmtNum($b['perf']['kd15'] ?? null)],
-            'Sub attempts / 15 min'   => [$fmtNum($a['perf']['sub15'] ?? null), $fmtNum($b['perf']['sub15'] ?? null)],
+            'Elo rating'              => isset($a['rating']) ? [number_format($a['rating']), number_format($b['rating'])] : null,
+            'Sig. strikes landed − absorbed / min' => [$fmtNum($a['raw_perf']['sig_diff'] ?? null), $fmtNum($b['raw_perf']['sig_diff'] ?? null)],
+            'Striking defense'        => [$fmtPct($a['raw_perf']['str_def'] ?? null), $fmtPct($b['raw_perf']['str_def'] ?? null)],
+            'Takedowns / 15 min'      => [$fmtNum($a['raw_perf']['td15'] ?? null), $fmtNum($b['raw_perf']['td15'] ?? null)],
+            'Takedown defense'        => [$fmtPct($a['raw_perf']['td_def'] ?? null), $fmtPct($b['raw_perf']['td_def'] ?? null)],
+            'Control time'            => [$fmtPct($a['raw_perf']['ctrl'] ?? null), $fmtPct($b['raw_perf']['ctrl'] ?? null)],
+            'Knockdowns / 15 min'     => [$fmtNum($a['raw_perf']['kd15'] ?? null), $fmtNum($b['raw_perf']['kd15'] ?? null)],
+            'Sub attempts / 15 min'   => [$fmtNum($a['raw_perf']['sub15'] ?? null), $fmtNum($b['raw_perf']['sub15'] ?? null)],
             'Fights with stats used'  => [$a['perf_fights'] . ' of ' . $a['fights_with_stats'], $b['perf_fights'] . ' of ' . $b['fights_with_stats']],
             'Months since last fight' => [$a['layoff_months'] ?? '—', $b['layoff_months'] ?? '—'],
         ];
@@ -397,7 +431,7 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
         <table class="table fight-cmp">
             <thead><tr><th></th><th class="num"><?= e($a['name']) ?></th><th class="num"><?= e($b['name']) ?></th></tr></thead>
             <tbody>
-            <?php foreach ($rowsCmp as $label => [$x, $y]): ?>
+            <?php foreach (array_filter($rowsCmp) as $label => [$x, $y]): ?>
                 <tr><td class="muted"><?= e($label) ?></td><td class="num"><?= e((string) $x) ?></td><td class="num"><?= e((string) $y) ?></td></tr>
             <?php endforeach; ?>
             </tbody>
@@ -432,6 +466,9 @@ $side = function (string $name, string $cls, ?float $model, ?float $kalshi, ?arr
 <?php endforeach; ?>
 </div>
 <?php endif; ?>
+
+</div>
+<?php endforeach; ?>
 
 <p class="news-note">A personal research model built from ESPN data. It is not betting advice, and its accuracy hasn't been measured yet.</p>
 <?php page_footer();

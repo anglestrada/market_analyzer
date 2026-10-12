@@ -403,8 +403,8 @@ function movement_explanation(int $movementId): array
 function latest_prediction(int $marketId): ?array
 {
     try {
-        $q = db()->prepare('SELECT win_probability, created_at FROM predictions WHERE market_id = :m ORDER BY created_at DESC LIMIT 1');
-        $q->execute([':m' => $marketId]);
+        $q = db()->prepare('SELECT win_probability, created_at FROM predictions WHERE market_id = :m AND model_version = :v ORDER BY created_at DESC LIMIT 1');
+        $q->execute([':m' => $marketId, ':v' => FightModel::DEFAULT_VERSION]);
         $r = $q->fetch();
     } catch (PDOException) {
         return null;   // fight-prediction tables not created yet

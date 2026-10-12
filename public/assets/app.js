@@ -939,7 +939,33 @@
     setInterval(() => { if (!document.hidden && state.id) load(state.id, { marketChanged: false, quiet: true }); }, 300000);
   }
 
+  /* ------------------------------------------------------------------
+   * Model version tabs (fight prediction page): v1 by default, ?v=v2 remembers the choice.
+   * ---------------------------------------------------------------- */
+  function initVersionTabs() {
+    const tabs = $$('[data-vtab]');
+    if (!tabs.length) return;
+    const desc = document.querySelector('[data-vtab-desc]');
+    const show = (v) => {
+      tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.vtab === v)));
+      $$('[data-vpanel]').forEach((p) => {
+        p.hidden = p.dataset.vpanel !== v;
+        if (!p.hidden) {
+          if (desc) desc.textContent = p.dataset.desc || '';
+          // Charts drawn while hidden have no size yet.
+          $$('canvas', p).forEach((c) => { const ch = window.Chart && Chart.getChart(c); if (ch) ch.resize(); });
+        }
+      });
+      const u = new URL(location.href);
+      u.searchParams.set('v', v);
+      history.replaceState(null, '', u);
+      $$('.vpanel .range a').forEach((a) => { const x = new URL(a.href, location.href); x.searchParams.set('v', v); a.href = x; });
+    };
+    tabs.forEach((t) => t.addEventListener('click', () => show(t.dataset.vtab)));
+  }
+
   initCharts();
+  initVersionTabs();
   updateRelTimes();
   setInterval(updateRelTimes, 30000);
   initSorting();

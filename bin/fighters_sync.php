@@ -9,6 +9,7 @@
  *   php bin/fighters_sync.php --budget=500      stop after 500 ESPN requests (the next run continues)
  *   php bin/fighters_sync.php --relink          redo automatic market → fighter matches (manual ones are kept)
  *   php bin/fighters_sync.php --predict-only    no ESPN requests; just recompute predictions
+ *   php bin/fighters_sync.php --deep            also every UFC opponent's full history (for bin/model_report.php --history)
  */
 declare(strict_types=1);
 
@@ -18,14 +19,14 @@ if (PHP_SAPI !== 'cli') {
 }
 require_once __DIR__ . '/../config.php';
 
-$opt = ['market' => null, 'budget' => 3000, 'relink' => false, 'predict-only' => false];
+$opt = ['market' => null, 'budget' => 3000, 'relink' => false, 'predict-only' => false, 'deep' => false];
 foreach (array_slice($argv, 1) as $a) {
     if (preg_match('/^--(market|budget)=(\d+)$/', $a, $m)) {
         $opt[$m[1]] = (int) $m[2];
-    } elseif (in_array($a, ['--relink', '--predict-only'], true)) {
+    } elseif (in_array($a, ['--relink', '--predict-only', '--deep'], true)) {
         $opt[substr($a, 2)] = true;
     } else {
-        fwrite(STDERR, "Unknown option: $a\nUsage: php bin/fighters_sync.php [--market=ID] [--budget=N] [--relink] [--predict-only]\n");
+        fwrite(STDERR, "Unknown option: $a\nUsage: php bin/fighters_sync.php [--market=ID] [--budget=N] [--relink] [--predict-only] [--deep]\n");
         exit(1);
     }
 }
@@ -33,12 +34,15 @@ foreach (array_slice($argv, 1) as $a) {
 $say = fn(string $m) => print('[' . gmdate('H:i:s') . "] $m\n");
 $runId = null;
 if (!$opt['predict-only']) {
-    $r = FighterSync::make($say)->run($opt['budget'], $opt['market'] ? [$opt['market']] : null, $opt['relink']);
+    $r = FighterSync::make($say)->run($opt['budget'], $opt['market'] ? [$opt['market']] : null, $opt['relink'], $opt['deep']);
     $runId = $r['run_id'];
 }
 
-$model = new FightModel(db());
-$model->predictAll($runId, $say);
+EloRatings::reset();
+$models = FightModel::all(db());
+foreach ($models as $m) {
+    $m->predictAll($runId, $say);
+}
 
 // Summary: model vs Kalshi for every linked open market (or the one asked for).
 $sql = "SELECT m.id, m.yes_subtitle, e.event_title, f.full_name, o.full_name AS opp,
@@ -51,16 +55,26 @@ $sql = "SELECT m.id, m.yes_subtitle, e.event_title, f.full_name, o.full_name AS 
          WHERE " . ($opt['market'] ? 'm.id = ' . (int) $opt['market'] : "m.status = 'open'") . '
       ORDER BY e.event_start_time NULLS LAST, m.id';
 $rows = db()->query($sql)->fetchAll();
-echo "\n" . str_pad('Market', 34) . str_pad('Model', 8) . str_pad('Kalshi', 8) . "Note\n";
+echo "\n" . str_pad('Market', 34);
+foreach ($models as $m) {
+    echo str_pad($m->version, 6);
+}
+echo str_pad('Kalshi', 8) . "Note\n";
 foreach ($rows as $r) {
-    $res = $model->predictMarket((int) $r['id']);
+    $ps = [];
+    foreach ($models as $m) {
+        $x = $m->predictMarket((int) $r['id']);
+        $ps[] = $x['ok'] ? round($x['p'] * 100) . '%' : '—';
+        $res ??= $x;   // notes / reasons from the first version
+    }
     $k   = $r['kalshi'] !== null ? round((float) $r['kalshi'] * 100) . '%' : '—';
-    $p   = $res['ok'] ? round($res['p'] * 100) . '%' : '—';
     $why = $res['ok'] ? implode(' ', array_slice($res['notes'], 0, 1)) : [
         'not_linked' => 'not matched to ESPN', 'no_opponent' => 'opponent not matched',
         'not_synced' => 'fighter data not synced yet (run again)', 'no_history' => 'no fight history on ESPN',
     ][$res['reason']] ?? $res['reason'];
-    printf("%-34s%-8s%-8s%s\n", substr("#{$r['id']} {$r['full_name']} vs " . ($r['opp'] ?? '?'), 0, 33), $p, $k, $why);
+    printf("%-34s%s%-8s%s\n", substr("#{$r['id']} {$r['full_name']} vs " . ($r['opp'] ?? '?'), 0, 33),
+        implode('', array_map(fn($x) => str_pad($x, 6), $ps)), $k, $why);
+    unset($res);
 }
 if (!$rows) {
     echo "No linked markets. Run a scan first so Kalshi markets exist, then run this again.\n";
