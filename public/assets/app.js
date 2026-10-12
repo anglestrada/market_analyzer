@@ -18,11 +18,11 @@
 
   // Dark grey + green palette (mirrors the CSS variables in app.css).
   const C = {
-    yes: '#7ccba6', no: '#d9b382', accent: '#7ccba6', amber: '#e2b35d', sky: '#8fb4d6',
+    yes: '#26d382', no: '#d9b382', accent: '#7ccba6', amber: '#e2b35d', sky: '#8fb4d6',
     violet: '#b4a7d6', slate: '#6f7873', down: '#f07a7a', up: '#63d394',
   };
   const STATUS = {
-    article_found: { label: 'Article found', color: '#7ccba6' },
+    article_found: { label: 'Article found', color: '#26d382' },
     no_explanation_found: { label: 'No explanation found', color: '#6f7873' },
     news_search_failed: { label: 'Search failed', color: '#e2b35d' },
     pending: { label: 'Pending', color: '#8fb4d6' },
@@ -169,8 +169,8 @@
     prediction(canvas, d) {
       const bars = d.bars || [];
       if (!bars.some((b) => b.model != null || b.kalshi != null)) return false;
-      const MODEL = { a: '#8fb4d6', b: '#b4a7d6' };    // model bars: fighter A blue, fighter B violet
-      const KALSHI = { a: C.yes, b: '#d9b382' };        // Kalshi lines: fighter A green, fighter B sand
+      const MODEL = { a: '#8fb4d6', b: '#9983d1' };    //  model bars: fighter A blue, fighter B violet
+      const KALSHI = { a: C.yes, b: '#f8ea2a' };        // Kalshi lines: fighter A green, fighter B sand
       const pct = (v) => (v == null ? 'n/a' : `${(+v).toFixed(1)}%`);
       const kalshiMarks = {
         id: 'kalshiMarks',
