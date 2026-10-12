@@ -19,6 +19,8 @@ final class SyncBudgetExceeded extends RuntimeException {}
 final class FighterSync
 {
     private const FULL_RESYNC_HOURS = 12;   // re-read a card fighter's eventlog this often (new fights)
+    private const FINISHED_RESYNC_HOURS = 1; // … but hourly once their fight is over, until ESPN has its result + stats
+    private const RECENT_FIGHT_DAYS = 14;   // keep trying that for fights up to this many days old
 
     private int $requests = 0;
     private int $budget   = 0;
@@ -66,15 +68,17 @@ final class FighterSync
 
             // Fighters on the selected markets, both sides.
             $rows = $this->marketRows($marketIds);
-            $ids  = [];
+            $ids  = [];   // fighter id => fight just finished
             foreach ($rows as $r) {
-                $ids[(int) $r['fighter_id']] = true;
-                if ($r['opponent_id']) {
-                    $ids[(int) $r['opponent_id']] = true;
+                foreach ([$r['fighter_id'], $r['opponent_id']] as $id) {
+                    if ($id) {
+                        $ids[(int) $id] = ($ids[(int) $id] ?? false) || (bool) $r['finished'];
+                    }
                 }
             }
-            foreach (array_keys($ids) as $fighterId) {
-                $this->syncFighter($fighterId, 'full');
+            foreach ($ids as $fighterId => $finished) {
+                // A finished fight asked for by --market= is re-read right away; the scan does it at most hourly.
+                $this->syncFighter($fighterId, 'full', null, $finished ? ($marketIds ? 0 : self::FINISHED_RESYNC_HOURS) : null);
             }
             // Their past opponents: just enough history for the record on the day they met.
             foreach (array_keys($ids) as $fighterId) {
@@ -218,13 +222,14 @@ final class FighterSync
      * @param string $level 'full'  = every fight with method, duration and both fighters' stats
      *                      'basic' = profile + fights back to $since (date + result only)
      */
-    public function syncFighter(int $fighterId, string $level = 'full', ?string $since = null): void
+    public function syncFighter(int $fighterId, string $level = 'full', ?string $since = null, ?int $freshHours = null): void
     {
         $f = $this->fighter($fighterId);
         if (!$f) {
             return;
         }
-        $fresh = $f['history_synced_at'] && strtotime($f['history_synced_at']) > time() - self::FULL_RESYNC_HOURS * 3600;
+        $freshHours ??= self::FULL_RESYNC_HOURS;
+        $fresh = $f['history_synced_at'] && strtotime($f['history_synced_at']) > time() - $freshHours * 3600;
         if ($level === 'full' && $fresh) {
             return;
         }
@@ -569,11 +574,32 @@ final class FighterSync
 
     /* ------------------------------------------------------------------ helpers */
 
+    /**
+     * Fighters to sync: open markets, plus markets whose fight took place in the last RECENT_FIGHT_DAYS days but
+     * isn't stored with its result and stats yet (so the accuracy page gets the method, round and strikes).
+     * 'finished' = that fight is over, so the fighters are re-read sooner than FULL_RESYNC_HOURS.
+     */
     private function marketRows(?array $marketIds): array
     {
-        $sql = "SELECT mf.fighter_id, mf.opponent_id FROM market_fighters mf JOIN markets m ON m.id = mf.market_id";
-        $sql .= $marketIds ? ' WHERE m.id IN (' . implode(',', array_map('intval', $marketIds)) . ')' : " WHERE m.status = 'open'";
-        return $this->db->query($sql)->fetchAll();
+        $sql = "SELECT mf.fighter_id, mf.opponent_id,
+                       CASE WHEN uf.fight_date IS NOT NULL AND uf.fight_date < :now
+                             AND NOT (uf.status_state = 'post' AND uf.detail_level = 'full') THEN 1 ELSE 0 END AS finished
+                  FROM market_fighters mf
+                  JOIN markets m ON m.id = mf.market_id
+             LEFT JOIN fights uf ON uf.id = mf.upcoming_fight_id";
+        $params = [':now' => gmdate('Y-m-d H:i:sP')];
+        if ($marketIds) {
+            $sql .= ' WHERE m.id IN (' . implode(',', array_map('intval', $marketIds)) . ')';
+        } else {
+            $sql .= " WHERE m.status = 'open'
+                         OR (uf.fight_date >= :since AND uf.fight_date < :now2
+                             AND NOT (uf.status_state = 'post' AND uf.detail_level = 'full'))";
+            $params[':since'] = gmdate('Y-m-d H:i:sP', time() - self::RECENT_FIGHT_DAYS * 86400);
+            $params[':now2']  = $params[':now'];
+        }
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
     }
 
     private function fighter(int $id): ?array
