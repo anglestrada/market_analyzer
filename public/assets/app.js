@@ -27,6 +27,9 @@
     news_search_failed: { label: 'Search failed', color: '#e2b35d' },
     pending: { label: 'Pending', color: '#8fb4d6' },
   };
+  // Kalshi price colour per fighter: used by the Overview chart and the fight prediction chart.
+  // Change these two to recolour both pages (and .kalshi-a / .kalshi-b / .dot-a / .dot-b in app.css).
+  const FIGHTER_KALSHI = { a: C.yes, b: '#f8ea2a' };
   const PALETTE = ['#7ccba6', '#d9b382', '#8fb4d6', '#e2b35d', '#b4a7d6', '#f07a7a', '#63d394', '#c9ced0'];
 
   const rgba = (hex, a) => {
@@ -170,7 +173,7 @@
       const bars = d.bars || [];
       if (!bars.some((b) => b.model != null || b.kalshi != null)) return false;
       const MODEL = { a: '#8fb4d6', b: '#9983d1' };    //  model bars: fighter A blue, fighter B violet
-      const KALSHI = { a: C.yes, b: '#f8ea2a' };        // Kalshi lines: fighter A green, fighter B sand
+      const KALSHI = FIGHTER_KALSHI;                    // Kalshi lines: fighter A, fighter B
       const pct = (v) => (v == null ? 'n/a' : `${(+v).toFixed(1)}%`);
       const kalshiMarks = {
         id: 'kalshiMarks',
@@ -649,7 +652,7 @@
       });
       state.chart = new Chart(document.getElementById('overview-chart'), {
         type: 'line',
-        data: { datasets: [line('yes', C.yes), line('no', C.no), marks('yesDrops', 'YES drop'), marks('noDrops', 'NO drop')] },
+        data: { datasets: [line('yes', FIGHTER_KALSHI.a), line('no', FIGHTER_KALSHI.b), marks('yesDrops', 'YES drop'), marks('noDrops', 'NO drop')] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
           interaction: { mode: 'nearest', axis: 'x', intersect: false },
@@ -691,10 +694,11 @@
       const byKey = Object.fromEntries(chart.data.datasets.map((ds) => [ds.key, ds]));
       byKey.yes.data = series.map((p) => ({ x: p.t, y: p.yes }));
       byKey.no.data = series.map((p) => ({ x: p.t, y: p.no }));
-      byKey.yes.label = `YES${d.market.yes_label ? ` · ${d.market.yes_label}` : ''}`;
-      byKey.no.label = `NO${d.market.no_label ? ` · ${d.market.no_label}` : ''}`;
+      const nameOf = (side) => (side === 'yes' ? d.market.yes_label || 'YES' : d.market.no_label || 'NO');
+      byKey.yes.label = nameOf('yes');
+      byKey.no.label = nameOf('no');
       const drops = (side) => (d.moves || []).filter((m) => m.side === side)
-        .map((m) => ({ x: m.x, y: m.y, label: `${side.toUpperCase()} dropped ${m.pts.toFixed(1)} pp` }));
+        .map((m) => ({ x: m.x, y: m.y, label: `${nameOf(side)} dropped ${m.pts.toFixed(1)} pp` }));
       byKey.yesDrops.data = drops('yes');
       byKey.noDrops.data = drops('no');
       byKey.yes.hidden = !show.yes; byKey.yesDrops.hidden = !show.yes;
@@ -841,7 +845,12 @@
       const main = state.side === 'no' ? 'no' : 'yes';
       const statusText = { open: 'Open market', closed: 'Closed market', settled: 'Settled market', cancelled: 'Cancelled market' }[m.status] || 'Market';
 
-      el('eyebrow').textContent = `UFC · ${statusText}`;
+      el('eyebrow').textContent = statusText.replace('market', 'fight');
+      // Side buttons: the two fighters' last names, then "Both".
+      $$('[data-side]', el('sides')).forEach((b) => {
+        if (b.dataset.side === 'yes') b.textContent = m.yes_label || 'YES';
+        if (b.dataset.side === 'no') b.textContent = m.no_label || 'NO';
+      });
       el('name').textContent = m.name;
       el('event').textContent = [m.event, m.event_start ? `Fight ${when(m.event_start)}` : null].filter(Boolean).join(' · ');
 
@@ -858,11 +867,11 @@
 
       const label = main === 'yes' ? m.yes_label : m.no_label;
       el('price').textContent = price(d.latest ? d.latest[main] : null);
-      el('price-side').textContent = `${main.toUpperCase()}${label ? ` · ${label}` : ''}`;
+      el('price-side').textContent = label || main.toUpperCase();
       if (!d.latest) {
         el('change').innerHTML = '<span class="flat">No snapshot saved yet</span>';
       } else if (state.side === 'both') {
-        el('change').innerHTML = `YES ${pp(d.change.yes)} · NO ${pp(d.change.no)} since previous scan`;
+        el('change').innerHTML = `${esc(m.yes_label || 'YES')} ${pp(d.change.yes)} · ${esc(m.no_label || 'NO')} ${pp(d.change.no)} since previous scan`;
       } else {
         el('change').innerHTML = d.change[main] == null
           ? '<span class="flat">Only one scan so far, so there is no change yet</span>'
@@ -870,9 +879,10 @@
       }
 
       const pts = (d.series || []).map((p) => p[main]).filter((v) => v != null);
-      el('foot-left').textContent = `Price history · ${d.range.label} · price in cents${state.side === 'both' ? ' · green = YES, sand = NO' : ''}`;
+      el('foot-left').innerHTML = `Kalshi price history · ${esc(d.range.label)} · cents${state.side === 'both'
+        ? ` · <span class="kalshi-a">${esc(m.yes_label || 'YES')}</span> / <span class="kalshi-b">${esc(m.no_label || 'NO')}</span>` : ''}`;
       el('foot-right').innerHTML = pts.length
-        ? `${main.toUpperCase()} start ${price(pts[0])} · now ${price(pts[pts.length - 1])} · ${pp(pts[pts.length - 1] - pts[0])}`
+        ? `${esc(label || main.toUpperCase())} start ${price(pts[0])} · now ${price(pts[pts.length - 1])} · ${pp(pts[pts.length - 1] - pts[0])}`
         : '';
 
       drawChart(d);
@@ -896,7 +906,9 @@
         if (!res.ok || !body || body.error) throw new Error(body?.error || `The server responded with ${res.status}.`);
         if (req !== state.req) return;   // a newer click won
         state.data = body;
-        state.id = id;
+        state.id = body.market?.id || id;   // a fight is always shown from its first market
+        markSelected(body.market?.event_id);
+        syncUrl();
         clearTimeout(timer);
         setLoading(false);
         render();
@@ -913,9 +925,10 @@
       history.replaceState(null, '', u);
     }
 
-    function markSelected(id) {
+    function markSelected(eventId) {
+      if (!eventId) return;
       $$('.mw-item, .drops-table tr[data-market-id]').forEach((n) => {
-        const on = +n.dataset.marketId === id;
+        const on = +n.dataset.eventId === +eventId;
         n.classList.toggle('is-selected', on);
         if (n.classList.contains('mw-item')) { if (on) n.setAttribute('aria-current', 'true'); else n.removeAttribute('aria-current'); }
       });
@@ -924,7 +937,8 @@
     function select(id, { scroll = false } = {}) {
       if (!id) return;
       state.id = id;
-      markSelected(id);
+      const row = document.querySelector(`[data-market-id="${id}"][data-event-id]`);
+      markSelected(row ? row.dataset.eventId : null);
       syncUrl();
       load(id, { view: true, marketChanged: true });
       if (scroll && box.getBoundingClientRect().top < 0) box.scrollIntoView({ behavior: 'smooth', block: 'start' });

@@ -23,7 +23,7 @@ function cents_or_null(mixed $v): ?float
 function overview_markets(int $userId): array
 {
     $stmt = db()->prepare(
-        "SELECT m.id, m.market_title, m.yes_subtitle, m.no_subtitle,
+        "SELECT m.id, m.event_id, m.market_title, m.yes_subtitle, m.no_subtitle,
                 e.event_title, e.event_start_time,
                 s.yes_price, s.no_price, s.captured_at,
                 p.yes_price AS prev_yes, p.no_price AS prev_no,
@@ -48,8 +48,10 @@ function overview_markets(int $userId): array
 
     return array_map(fn($r) => [
         'id'          => (int) $r['id'],
+        'event_id'    => (int) $r['event_id'],
         'name'        => $r['yes_subtitle'] ?: $r['market_title'],
         'title'       => $r['market_title'],
+        'no_label'    => $r['no_subtitle'],
         'event'       => $r['event_title'],
         'event_start' => $r['event_start_time'],
         'yes'         => cents_or_null($r['yes_price']),
@@ -93,33 +95,60 @@ function overview_drops(int $days = 7, int $limit = 25): array
 }
 
 /** Everything the Overview needs to draw one market: header, series, drop markers, best explanation. */
+/** "Raul Rosas Jr." → "Rosas" */
+function fighter_last_name(?string $name): ?string
+{
+    if ($name === null || trim($name) === '') {
+        return null;
+    }
+    $parts = preg_split('/\s+/', trim(preg_replace('/,?\s+\b(jr|sr|ii|iii)\.?$/i', '', trim($name))));
+    return (string) end($parts);
+}
+
+/**
+ * Everything the Overview needs to draw one fight. Kalshi lists one "Will X win?" market per fighter; both are
+ * merged here: the "yes" line is fighter A's YES price, the "no" line is fighter B's YES price (fighter A = the
+ * fight's first market). A fight with only one market falls back to that market's YES / NO.
+ */
 function market_payload(int $id, string $range, int $userId): ?array
 {
     $range = array_key_exists($range, OVERVIEW_RANGES) ? $range : '24h';
 
+    $stmt = db()->prepare('SELECT event_id FROM markets WHERE id = :id');
+    $stmt->execute([':id' => $id]);
+    $eventId = $stmt->fetchColumn();
+    if ($eventId === false) {
+        return null;
+    }
     $stmt = db()->prepare(
         'SELECT m.*, e.event_title, e.event_start_time, e.espn_data,
                 (SELECT 1 FROM watchlist_items w WHERE w.market_id = m.id AND w.user_id = :u) AS watched
-           FROM markets m JOIN events e ON e.id = m.event_id WHERE m.id = :id'
+           FROM markets m JOIN events e ON e.id = m.event_id WHERE m.event_id = :e ORDER BY m.id LIMIT 2'
     );
-    $stmt->execute([':u' => $userId, ':id' => $id]);
-    $m = $stmt->fetch();
-    if (!$m) {
-        return null;
-    }
+    $stmt->execute([':u' => $userId, ':e' => $eventId]);
+    $markets = $stmt->fetchAll();
+    $m  = $markets[0];
+    $mb = $markets[1] ?? null;              // fighter B's own market, if Kalshi has one
+    $aId = (int) $m['id'];
+    $bId = $mb ? (int) $mb['id'] : null;
 
-    $snap = db()->prepare('SELECT yes_price, no_price, captured_at FROM market_snapshots
-                            WHERE market_id = :m ORDER BY captured_at DESC LIMIT 2');
-    $snap->execute([':m' => $id]);
-    [$latest, $prev] = $snap->fetchAll() + [null, null];
-
-    $change = fn(string $side) => ($latest && $prev && $latest[$side . '_price'] !== null && $prev[$side . '_price'] !== null)
-        ? round(((float) $latest[$side . '_price'] - (float) $prev[$side . '_price']) * 100, 2) : null;
+    $last2 = function (int $marketId): array {
+        $q = db()->prepare('SELECT yes_price, no_price, captured_at FROM market_snapshots
+                             WHERE market_id = :m ORDER BY captured_at DESC LIMIT 2');
+        $q->execute([':m' => $marketId]);
+        return $q->fetchAll() + [null, null];
+    };
+    [$latestA, $prevA] = $last2($aId);
+    [$latestB, $prevB] = $bId ? $last2($bId) : [null, null];
+    // Fighter B's price: their own market's YES, or (one market only) this market's NO.
+    $bNow  = $bId ? ($latestB['yes_price'] ?? null) : ($latestA['no_price'] ?? null);
+    $bPrev = $bId ? ($prevB['yes_price'] ?? null) : ($prevA['no_price'] ?? null);
+    $diff  = fn($now, $prev) => ($now !== null && $prev !== null) ? round(((float) $now - (float) $prev) * 100, 2) : null;
 
     // Range window
     $now  = new DateTimeImmutable('now', new DateTimeZone('UTC'));
     $from = OVERVIEW_RANGES[$range][0] ? $now->modify(OVERVIEW_RANGES[$range][0]) : new DateTimeImmutable('2000-01-01', new DateTimeZone('UTC'));
-    $p    = [':m' => $id, ':from' => $from->format('c'), ':to' => $now->format('c')];
+    $p    = [':m' => $aId, ':from' => $from->format('c'), ':to' => $now->format('c')];
 
     $span = db()->prepare('SELECT MIN(captured_at) AS a, MAX(captured_at) AS b FROM market_snapshots
                             WHERE market_id = :m AND captured_at BETWEEN :from AND :to');
@@ -128,50 +157,77 @@ function market_payload(int $id, string $range, int $userId): ?array
     $seconds = ($sp['a'] && $sp['b']) ? max(300, strtotime($sp['b']) - strtotime($sp['a'])) : 300;
     $bucket  = max(300, (int) ceil($seconds / 400));   // ≤ ~400 points, never finer than one scan
 
-    $q = db()->prepare("SELECT DISTINCT ON (FLOOR(EXTRACT(EPOCH FROM captured_at) / $bucket))
-                               captured_at, yes_price, no_price
-                          FROM market_snapshots
-                         WHERE market_id = :m AND captured_at BETWEEN :from AND :to
-                      ORDER BY FLOOR(EXTRACT(EPOCH FROM captured_at) / $bucket), captured_at DESC");
-    $q->execute($p);
-    $series = array_map(fn($r) => [
-        't' => iso($r['captured_at']), 'yes' => cents_or_null($r['yes_price']), 'no' => cents_or_null($r['no_price']),
-    ], $q->fetchAll());
+    $bucketed = function (int $marketId) use ($bucket, $from, $now): array {
+        $q = db()->prepare("SELECT DISTINCT ON (FLOOR(EXTRACT(EPOCH FROM captured_at) / $bucket))
+                                   FLOOR(EXTRACT(EPOCH FROM captured_at) / $bucket) AS k, captured_at, yes_price, no_price
+                              FROM market_snapshots
+                             WHERE market_id = :m AND captured_at BETWEEN :from AND :to
+                          ORDER BY FLOOR(EXTRACT(EPOCH FROM captured_at) / $bucket), captured_at DESC");
+        $q->execute([':m' => $marketId, ':from' => $from->format('c'), ':to' => $now->format('c')]);
+        $out = [];
+        foreach ($q->fetchAll() as $r) {
+            $out[(string) (int) $r['k']] = $r;
+        }
+        return $out;
+    };
+    $rowsA = $bucketed($aId);
+    $rowsB = $bId ? $bucketed($bId) : [];
+    $series = [];
+    foreach ($rowsA as $k => $r) {
+        $series[] = [
+            't'   => iso($r['captured_at']),
+            'yes' => cents_or_null($r['yes_price']),
+            'no'  => $bId ? cents_or_null($rowsB[$k]['yes_price'] ?? null) : cents_or_null($r['no_price']),
+        ];
+    }
 
-    $q = db()->prepare('SELECT detected_at, dropped_side, drop_percentage_points, current_price
-                          FROM market_movements WHERE market_id = :m AND detected_at BETWEEN :from AND :to
-                      ORDER BY detected_at');
-    $q->execute($p);
-    $moves = array_map(fn($r) => [
-        'x' => iso($r['detected_at']), 'side' => $r['dropped_side'],
-        'y' => cents_or_null($r['current_price']), 'pts' => (float) $r['drop_percentage_points'],
-    ], $q->fetchAll());
+    // Drop markers: each fighter's YES drops, drawn on that fighter's line.
+    $q = db()->prepare("SELECT market_id, detected_at, dropped_side, drop_percentage_points, current_price
+                          FROM market_movements WHERE market_id IN (" . implode(',', array_filter([$aId, $bId])) . ")
+                           AND detected_at BETWEEN :from AND :to ORDER BY detected_at");
+    $q->execute([':from' => $from->format('c'), ':to' => $now->format('c')]);
+    $moves = [];
+    foreach ($q->fetchAll() as $r) {
+        $isA = (int) $r['market_id'] === $aId;
+        if ($bId && $r['dropped_side'] !== 'yes') {
+            continue;   // a NO drop is the other fighter rising; their own YES drop already shows it
+        }
+        $moves[] = [
+            'x' => iso($r['detected_at']), 'side' => $bId ? ($isA ? 'yes' : 'no') : $r['dropped_side'],
+            'y' => cents_or_null($r['current_price']), 'pts' => (float) $r['drop_percentage_points'],
+        ];
+    }
 
+    $nameA = $m['yes_subtitle'] ?: $m['market_title'];
+    $nameB = $mb ? ($mb['yes_subtitle'] ?: $mb['market_title']) : ($m['no_subtitle'] ?: null);
     return [
         'market' => [
-            'id'          => (int) $m['id'],
-            'name'        => $m['yes_subtitle'] ?: $m['market_title'],
+            'id'          => $aId,
+            'event_id'    => (int) $eventId,
+            'market_ids'  => array_values(array_filter([$aId, $bId])),
+            'name'        => $nameB ? "$nameA vs $nameB" : $nameA,
             'title'       => $m['market_title'],
             'event'       => $m['event_title'],
             'event_start' => iso($m['event_start_time']),
             'status'      => $m['status'],
             'ticker'      => $m['market_ticker'],
-            'yes_label'   => $m['yes_subtitle'],
-            'no_label'    => $m['no_subtitle'],
-            'url'         => url('/market.php', ['id' => (int) $m['id']]),
-            'prediction_url' => url('/prediction.php', ['market' => (int) $m['id']]),
+            'yes_label'   => fighter_last_name($nameA),   // the chart's two lines / buttons
+            'no_label'    => fighter_last_name($nameB),
+            'paired'      => $bId !== null,
+            'url'         => url('/market.php', ['id' => $aId]),
+            'prediction_url' => url('/prediction.php', ['market' => $aId]),
         ],
         'watched' => (bool) $m['watched'],
-        'latest'  => $latest ? [
-            'yes' => cents_or_null($latest['yes_price']), 'no' => cents_or_null($latest['no_price']), 'at' => iso($latest['captured_at']),
+        'latest'  => $latestA ? [
+            'yes' => cents_or_null($latestA['yes_price']), 'no' => cents_or_null($bNow), 'at' => iso($latestA['captured_at']),
         ] : null,
-        'change'  => ['yes' => $change('yes'), 'no' => $change('no')],
+        'change'  => ['yes' => $diff($latestA['yes_price'] ?? null, $prevA['yes_price'] ?? null), 'no' => $diff($bNow, $bPrev)],
         'range'   => ['key' => $range, 'label' => OVERVIEW_RANGES[$range][1]],
         'series'  => $series,
         'moves'   => $moves,
-        'analysis' => market_best_explanation($id),
+        'analysis' => market_best_explanation(array_values(array_filter([$aId, $bId]))),
         'fight'    => espn_fight_info($m['espn_data'] ?? null, $m['yes_subtitle']),
-        'model'    => latest_prediction($id),
+        'model'    => latest_prediction($aId),
     ];
 }
 
@@ -235,10 +291,10 @@ function evidence_sources_configured(): array
  * The best-explained drop on this market: the one with the strongest supporting item from any source
  * (news article or live evidence), else the latest drop. Status "none" when the market never dropped ≥ 5 pp.
  */
-function market_best_explanation(int $marketId): array
+function market_best_explanation(int|array $marketIds): array
 {
-    $count = db()->prepare('SELECT COUNT(*) FROM market_movements WHERE market_id = :m');
-    $count->execute([':m' => $marketId]);
+    $in = implode(',', array_map('intval', (array) $marketIds)) ?: '0';
+    $count = db()->query("SELECT COUNT(*) FROM market_movements WHERE market_id IN ($in)");
     $drops = (int) $count->fetchColumn();
     if ($drops === 0) {
         return ['status' => 'none', 'drops' => 0];
@@ -250,13 +306,13 @@ function market_best_explanation(int $marketId): array
       LEFT JOIN movement_analysis ma ON ma.movement_id = mm.id
       LEFT JOIN LATERAL (SELECT MAX(score) AS s FROM movement_evidence ev
                           WHERE ev.movement_id = mm.id AND ev.status = 'found' AND ev.stance = 'supports') ev ON TRUE
-          WHERE mm.market_id = :m
+          WHERE mm.market_id IN ($in)
        ORDER BY GREATEST(CASE WHEN ma.explanation_status = 'article_found' THEN ma.relevance_score ELSE 0 END,
                          COALESCE(ev.s, 0)) DESC,
                 mm.detected_at DESC
           LIMIT 1"
     );
-    $q->execute([':m' => $marketId]);
+    $q->execute();
     return movement_explanation((int) $q->fetchColumn()) + ['drops' => $drops];
 }
 
