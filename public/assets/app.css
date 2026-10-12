@@ -537,3 +537,12 @@ form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
 .fights-table tr.fight-a td { border-bottom-color: transparent; }
 .fights-table tr.fight-b td { padding-top: 0; }
 @media (max-width: 760px) { .pred-hero-2 { grid-template-columns: 1fr; } .pred-fighter + .pred-fighter { border-left: 0; padding-left: 0; } }
+
+/* model version tabs */
+.vtabs { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); margin: 0 0 var(--s4); border-bottom: 1px solid var(--border); }
+.vtabs [data-vtab] { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: var(--s2) var(--s3);
+  font: inherit; font-weight: 600; cursor: pointer; margin-bottom: -1px; }
+.vtabs [data-vtab]:hover { color: var(--text); }
+.vtabs [data-vtab][aria-selected="true"] { color: var(--text); border-bottom-color: #8fb4d6; }
+.vtab-p { font-weight: 500; color: #8fb4d6; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.vtab-note { margin-left: auto; padding-bottom: 4px; }

@@ -25,6 +25,7 @@ final class FighterSync
     private array $cache  = [];
     private int $fighters = 0;
     private int $fights   = 0;
+    private bool $deep    = false;
 
     /** @var callable|null */
     private $log;
@@ -48,9 +49,14 @@ final class FighterSync
      * @param int[]|null $marketIds only these markets (default: every open UFC market)
      * @return array{run_id:int, status:string, requests:int, fighters:int, fights:int, error:?string}
      */
-    public function run(int $budget = 1500, ?array $marketIds = null, bool $relink = false): array
+    /**
+     * @param bool $deep also sync every past opponent's full history and stats (for the history backtest);
+     *                   several times more ESPN requests the first time, then only new fights
+     */
+    public function run(int $budget = 1500, ?array $marketIds = null, bool $relink = false, bool $deep = false): array
     {
         $this->budget = max(1, $budget);
+        $this->deep   = $deep;
         $runId = (int) $this->db->query("INSERT INTO fighter_sync_runs (status) VALUES ('running') RETURNING id")->fetchColumn();
         $status = 'completed';
         $error  = null;
@@ -260,6 +266,20 @@ final class FighterSync
     /** For each past opponent of this fighter whose record on the day is unknown, sync their fights since then. */
     private function syncOpponentRecords(int $fighterId): void
     {
+        if ($this->deep) {
+            // Every UFC opponent at full detail (their whole history + stats), not just their record on the day.
+            $stmt = $this->db->prepare(
+                "SELECT DISTINCT o.fighter_id FROM fight_participants me
+                   JOIN fight_participants o ON o.fight_id = me.fight_id AND o.fighter_id <> me.fighter_id
+                   JOIN fights f ON f.id = me.fight_id
+                  WHERE me.fighter_id = :id AND f.status_state = 'post' AND f.league = 'ufc'"
+            );
+            $stmt->execute([':id' => $fighterId]);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $opp) {
+                $this->syncFighter((int) $opp, 'full');
+            }
+            return;
+        }
         $stmt = $this->db->prepare(
             "SELECT o.fighter_id AS opp, MIN(f.fight_date) AS since
                FROM fight_participants me

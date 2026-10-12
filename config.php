@@ -405,6 +405,7 @@ require_once __DIR__ . '/src/LiveSignals.php';
 require_once __DIR__ . '/src/EspnClient.php';
 require_once __DIR__ . '/src/EvidenceCollector.php';
 require_once __DIR__ . '/src/FighterSync.php';
+require_once __DIR__ . '/src/EloRatings.php';
 require_once __DIR__ . '/src/FightModel.php';
 require_once __DIR__ . '/src/ModelEvaluator.php';
 require_once __DIR__ . '/src/Scanner.php';

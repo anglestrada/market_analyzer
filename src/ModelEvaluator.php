@@ -6,8 +6,10 @@ declare(strict_types=1);
  *
  *   resolve()   for every finished fight: the last prediction saved before the fight (source "live"), the Kalshi
  *               price at the same moment, the result, and the scores → prediction_results
- *   backtest()  the current model version recomputed with only the data from before each fight (source "backtest"),
+ *   backtest()  every model version recomputed with only the data from before each Kalshi fight (source "backtest"),
  *               so a new version can be scored on every past fight straight away
+ *   history()   every model version on stored past UFC fights between two fully-synced fighters (source "history"):
+ *               many more fights than Kalshi markets, no Kalshi price to compare against
  *   report()    scorecard, calibration, which parts of the formula helped, model vs Kalshi disagreements
  *
  * Scores (per fight, averaged):
@@ -18,11 +20,19 @@ declare(strict_types=1);
  */
 final class ModelEvaluator
 {
-    public function __construct(private PDO $db, private FightModel $model, private ?KalshiClient $kalshi = null) {}
+    /** @var FightModel[] version => model */
+    private array $models = [];
+
+    public function __construct(private PDO $db, private ?KalshiClient $kalshi = null)
+    {
+        foreach (FightModel::all($db) as $m) {
+            $this->models[$m->version] = $m;
+        }
+    }
 
     public static function make(?KalshiClient $kalshi = null): self
     {
-        return new self(db(), new FightModel(db()), $kalshi);
+        return new self(db(), $kalshi);
     }
 
     /**
@@ -88,35 +98,111 @@ final class ModelEvaluator
         return $added;
     }
 
-    /** Scores the current model version on every finished fight it has no backtest row for yet. @return int */
-    public function backtest(?callable $say = null, bool $redo = false): int
+    /** Scores every model version on every finished Kalshi fight it has no backtest row for yet. @return int */
+    public function backtest(?callable $say = null, bool $redo = false, ?string $only = null): int
     {
-        $this->model->registerVersion($say);
         $added = 0;
-        foreach ($this->finishedFights() as $f) {
-            if ($redo) {
-                $this->db->prepare("DELETE FROM prediction_results WHERE event_id = :e AND model_version = :v AND source = 'backtest'")
-                    ->execute([':e' => $f['event_id'], ':v' => FightModel::VERSION]);
-            } elseif ($this->exists($f['event_id'], FightModel::VERSION, 'backtest')) {
+        $fights = $this->finishedFights();
+        usort($fights, fn($x, $y) => strcmp($x['as_of'], $y['as_of']));   // chronological: Elo replays once
+        foreach ($this->models as $version => $model) {
+            if ($only !== null && $version !== $only) {
                 continue;
             }
-            // Only data from before the fight: one minute before the earlier of the fight start and ESPN's fight date.
-            $asOf = (new DateTimeImmutable($f['as_of'], new DateTimeZone('UTC')))->modify('-60 seconds');
-            $res  = $this->model->predictMarket($f['a_market'], $asOf);
-            if (!$res['ok']) {
-                continue;
+            $model->registerVersion($say);
+            $n = 0;
+            foreach ($fights as $f) {
+                if ($redo) {
+                    $this->db->prepare("DELETE FROM prediction_results WHERE event_id = :e AND model_version = :v AND source = 'backtest'")
+                        ->execute([':e' => $f['event_id'], ':v' => $version]);
+                } elseif ($this->exists($f['event_id'], $version, 'backtest')) {
+                    continue;
+                }
+                // Only data from before the fight: one minute before the earlier of the fight start and ESPN's fight date.
+                $asOf = (new DateTimeImmutable($f['as_of'], new DateTimeZone('UTC')))->modify('-60 seconds');
+                $res  = $model->predictMarket($f['a_market'], $asOf);
+                if ($res['ok']) {
+                    $n += $this->save($f, $version, 'backtest', self::fromResult($res, $asOf));
+                }
             }
-            $added += $this->save($f, FightModel::VERSION, 'backtest', [
-                'id' => null, 'created_at' => $asOf->format(DATE_ATOM), 'p' => (float) $res['p'],
-                'resume' => $res['parts']['resume']['value'], 'performance' => $res['parts']['performance']['value'],
-                'matchup' => $res['parts']['matchup']['value'], 'context' => $res['parts']['context']['value'],
-                'delta' => $res['delta'], 'inputs' => FightModel::inputs($res),
-            ]);
-        }
-        if ($say && $added) {
-            $say('Model backtest (' . FightModel::VERSION . "): $added fight(s) scored.");
+            if ($say && $n) {
+                $say("Model backtest ($version): $n fight(s) scored.");
+            }
+            $added += $n;
         }
         return $added;
+    }
+
+    /**
+     * Scores every model version on stored past UFC fights where both fighters' full histories are synced
+     * (php bin/fighters_sync.php --deep fills in opponents' histories). @return int
+     */
+    public function history(?callable $say = null, bool $redo = false, ?string $only = null, int $limit = 5000): int
+    {
+        $rows = $this->db->query(
+            "SELECT fi.id AS fight_id, fi.fight_date, fi.weight_class, fi.method, fi.end_round,
+                    a.fighter_id AS a_id, a.result, b.fighter_id AS b_id
+               FROM fights fi
+               JOIN fight_participants a ON a.fight_id = fi.id
+               JOIN fight_participants b ON b.fight_id = fi.id AND b.fighter_id > a.fighter_id   -- one row per fight
+               JOIN fighters fa ON fa.id = a.fighter_id
+               JOIN fighters fb ON fb.id = b.fighter_id
+              WHERE fi.status_state = 'post' AND fi.league = 'ufc' AND fi.fight_date IS NOT NULL
+                AND a.result IS NOT NULL
+                AND fa.history_synced_at IS NOT NULL AND fb.history_synced_at IS NOT NULL
+           ORDER BY fi.fight_date, fi.id
+              LIMIT " . max(1, $limit)
+        )->fetchAll();
+
+        $added = 0;
+        foreach ($this->models as $version => $model) {
+            if ($only !== null && $version !== $only) {
+                continue;
+            }
+            $model->registerVersion($say);
+            if ($redo) {
+                $this->db->prepare("DELETE FROM prediction_results WHERE source = 'history' AND model_version = :v")->execute([':v' => $version]);
+            }
+            $have = $this->db->prepare("SELECT fight_id FROM prediction_results WHERE source = 'history' AND model_version = :v");
+            $have->execute([':v' => $version]);
+            $done = array_flip(array_map('intval', $have->fetchAll(PDO::FETCH_COLUMN)));
+            $n = 0;
+            foreach ($rows as $r) {
+                if (isset($done[(int) $r['fight_id']])) {
+                    continue;
+                }
+                $asOf = (new DateTimeImmutable((string) $r['fight_date'], new DateTimeZone('UTC')))->modify('-60 seconds');
+                $res  = $model->predictPair((int) $r['a_id'], (int) $r['b_id'], $asOf, $r['weight_class'] ?: null);
+                if (!$res['ok']) {
+                    continue;
+                }
+                $result = match ($r['result']) { 'W' => 'win', 'L' => 'loss', 'D' => 'draw', default => 'no_contest' };
+                $n += $this->save([
+                    'event_id' => null, 'a_market' => null, 'b_market' => null, 'fight_id' => (int) $r['fight_id'],
+                    'fighter_id' => (int) $r['a_id'], 'opponent_id' => (int) $r['b_id'],
+                    'cutoff' => $asOf->format(DATE_ATOM), 'cutoff_source' => 'espn',
+                    'outcome' => in_array($result, ['win', 'loss'], true) ? ($result === 'win' ? 1 : 0) : null,
+                    'result_type' => $result, 'outcome_source' => 'espn',
+                    'method' => $r['method'], 'end_round' => $r['end_round'] !== null ? (int) $r['end_round'] : null,
+                ], $version, 'history', self::fromResult($res, $asOf));
+            }
+            if ($say && $n) {
+                $say("Model history ($version): $n past fight(s) scored.");
+            }
+            $added += $n;
+        }
+        return $added;
+    }
+
+    /** A FightModel result → the row values save() needs. */
+    private static function fromResult(array $res, DateTimeImmutable $asOf): array
+    {
+        $part = fn(string $k) => $res['parts'][$k]['value'] ?? null;
+        return [
+            'id' => null, 'created_at' => $asOf->format(DATE_ATOM), 'p' => (float) $res['p'],
+            'resume' => $part('resume'), 'performance' => $part('performance'), 'matchup' => $part('matchup'),
+            'context' => $part('context'), 'rating' => $part('rating'), 'age' => $part('age'),
+            'delta' => $res['delta'], 'inputs' => FightModel::inputs($res),
+        ];
     }
 
     /* ------------------------------------------------------------------ finished fights */
@@ -235,7 +321,8 @@ final class ModelEvaluator
                 continue;
             }
             $q = $this->db->prepare(
-                'SELECT id, created_at, win_probability, resume_score, performance_score, matchup_score, context_score, delta, inputs
+                'SELECT id, created_at, win_probability, resume_score, performance_score, matchup_score, context_score,
+                        rating_score, age_score, delta, inputs
                    FROM predictions WHERE market_id = :m AND model_version = :v AND created_at <= :cut
                ORDER BY created_at DESC LIMIT 1'
             );
@@ -248,6 +335,7 @@ final class ModelEvaluator
                     'p' => $flip ? 1 - (float) $r['win_probability'] : (float) $r['win_probability'],
                     'resume' => $num($r['resume_score']), 'performance' => $num($r['performance_score']),
                     'matchup' => $num($r['matchup_score']), 'context' => $num($r['context_score']), 'delta' => $num($r['delta']),
+                    'rating' => $num($r['rating_score']), 'age' => $num($r['age_score']),
                     'inputs' => $r['inputs'] ? json_decode((string) $r['inputs'], true) + ($flip ? ['flipped' => true] : []) : null,
                 ];
             }
@@ -278,22 +366,23 @@ final class ModelEvaluator
         [$kbr, $kl, $kc] = $sc($k);
 
         $stmt = $this->db->prepare(
-            'INSERT INTO prediction_results (event_id, market_id, fighter_id, opponent_id, model_version, source, prediction_id,
+            'INSERT INTO prediction_results (event_id, market_id, fight_id, fighter_id, opponent_id, model_version, source, prediction_id,
                     predicted_at, cutoff_at, cutoff_source, model_p, kalshi_p, kalshi_p_raw, outcome, result_type, outcome_source,
                     method, end_round, model_brier, model_logloss, model_correct, kalshi_brier, kalshi_logloss, kalshi_correct,
-                    resume_score, performance_score, matchup_score, context_score, delta, inputs)
-             VALUES (:e, :m, :f, :o, :v, :src, :pid, :pat, :cut, :cs, :p, :k, :kr, :y, :rt, :os, :meth, :rnd,
-                     :mb, :ml, :mc, :kb, :kl, :kc, :rs, :ps, :ms, :cx, :d, :in)
-             ON CONFLICT (event_id, model_version, source) DO NOTHING'
+                    resume_score, performance_score, matchup_score, context_score, rating_score, age_score, delta, inputs)
+             VALUES (:e, :m, :fid, :f, :o, :v, :src, :pid, :pat, :cut, :cs, :p, :k, :kr, :y, :rt, :os, :meth, :rnd,
+                     :mb, :ml, :mc, :kb, :kl, :kc, :rs, :ps, :ms, :cx, :rat, :age, :d, :in)
+             ON CONFLICT DO NOTHING'
         );
         $stmt->execute([
-            ':e' => $f['event_id'], ':m' => $f['a_market'], ':f' => $f['fighter_id'], ':o' => $f['opponent_id'],
+            ':e' => $f['event_id'], ':m' => $f['a_market'], ':fid' => $f['fight_id'] ?? null, ':f' => $f['fighter_id'], ':o' => $f['opponent_id'],
             ':v' => $version, ':src' => $source, ':pid' => $pred['id'], ':pat' => $pred['created_at'],
             ':cut' => $f['cutoff'], ':cs' => $f['cutoff_source'],
             ':p' => round($pred['p'], 4), ':k' => $k !== null ? round($k, 4) : null, ':kr' => $ka !== null ? round($ka, 4) : null,
             ':y' => $y, ':rt' => $f['result_type'], ':os' => $f['outcome_source'], ':meth' => $f['method'], ':rnd' => $f['end_round'],
             ':mb' => $mb, ':ml' => $ml, ':mc' => $mc, ':kb' => $kbr, ':kl' => $kl, ':kc' => $kc,
             ':rs' => $pred['resume'], ':ps' => $pred['performance'], ':ms' => $pred['matchup'], ':cx' => $pred['context'],
+            ':rat' => $pred['rating'] ?? null, ':age' => $pred['age'] ?? null,
             ':d' => $pred['delta'], ':in' => $pred['inputs'] ? json_encode($pred['inputs'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null,
         ]);
         return $stmt->rowCount();
@@ -331,7 +420,7 @@ final class ModelEvaluator
         $q = $this->db->prepare(
             'SELECT r.*, e.event_title, fa.full_name AS a_name, fb.full_name AS b_name
                FROM prediction_results r
-               JOIN events e ON e.id = r.event_id
+          LEFT JOIN events e ON e.id = r.event_id
           LEFT JOIN fighters fa ON fa.id = r.fighter_id
           LEFT JOIN fighters fb ON fb.id = r.opponent_id
               WHERE ' . implode(' AND ', $where) . ' ORDER BY r.cutoff_at DESC'
@@ -387,7 +476,8 @@ final class ModelEvaluator
         // Which parts of the formula pointed at the winner?
         $parts = [];
         foreach ($groups as $key => $g) {
-            foreach (['resume_score' => 'resume', 'performance_score' => 'performance', 'matchup_score' => 'matchup', 'context_score' => 'context'] as $col => $label) {
+            foreach (['resume_score' => 'resume', 'rating_score' => 'rating', 'performance_score' => 'performance',
+                      'matchup_score' => 'matchup', 'context_score' => 'context', 'age_score' => 'age'] as $col => $label) {
                 $used = array_filter($g, fn($r) => $r[$col] !== null && abs((float) $r[$col]) > 1e-6);
                 $parts[$key][$label] = [
                     'fights_used'      => count($used),
