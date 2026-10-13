@@ -163,7 +163,11 @@ php bin/fighters_sync.php --predict-only  # recompute without ESPN requests
 php bin/espn_probe.php "Fighter Name"     # see what ESPN returns for a fighter
 ```
 
-To fix a wrong match, update `market_fighters` (`fighter_id` / `opponent_id`) and set `match_method = 'manual'`.
+Names are matched even when Kalshi and ESPN spell them differently (Alex / Alexander Volkanovski, accents, Jr.,
+reversed order): if ESPN's search finds nothing for the full name, the last name is searched and the first name has to
+fit. If a fighter still isn't found (or the match is wrong), link it by hand with the number from the fighter's ESPN
+URL (`espn.com/mma/fighter/_/id/<number>/...`):
+`php bin/fighters_sync.php --market=ID --espn=<number>`. Manual links are never overwritten.
 The sync job never overwrites manual rows.
 
 ## Scoring the fight model

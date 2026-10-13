@@ -10,6 +10,9 @@
  *   php bin/fighters_sync.php --relink          redo automatic market → fighter matches (manual ones are kept)
  *   php bin/fighters_sync.php --predict-only    no ESPN requests; just recompute predictions
  *   php bin/fighters_sync.php --deep            also every UFC opponent's full history (for bin/model_report.php --history)
+ *   php bin/fighters_sync.php --market=123 --espn=3949584
+ *                                               link market 123 to that ESPN athlete by hand (the number in the fighter's
+ *                                               espn.com/mma/fighter/_/id/<number>/… URL), then sync it
  */
 declare(strict_types=1);
 
@@ -19,22 +22,62 @@ if (PHP_SAPI !== 'cli') {
 }
 require_once __DIR__ . '/../config.php';
 
-$opt = ['market' => null, 'budget' => 3000, 'relink' => false, 'predict-only' => false, 'deep' => false];
+$opt = ['market' => null, 'espn' => null, 'budget' => 3000, 'relink' => false, 'predict-only' => false, 'deep' => false];
 foreach (array_slice($argv, 1) as $a) {
-    if (preg_match('/^--(market|budget)=(\d+)$/', $a, $m)) {
+    if (preg_match('/^--(market|budget|espn)=(\d+)$/', $a, $m)) {
         $opt[$m[1]] = (int) $m[2];
     } elseif (in_array($a, ['--relink', '--predict-only', '--deep'], true)) {
         $opt[substr($a, 2)] = true;
     } else {
-        fwrite(STDERR, "Unknown option: $a\nUsage: php bin/fighters_sync.php [--market=ID] [--budget=N] [--relink] [--predict-only] [--deep]\n");
+        fwrite(STDERR, "Unknown option: $a\nUsage: php bin/fighters_sync.php [--market=ID [--espn=ATHLETE_ID]] [--budget=N] [--relink] [--predict-only] [--deep]\n");
         exit(1);
     }
 }
 
 $say = fn(string $m) => print('[' . gmdate('H:i:s') . "] $m\n");
+
+// Manual link: --market=ID --espn=ATHLETE_ID (kept by every later sync; --relink doesn't touch it either).
+if ($opt['espn'] !== null) {
+    if (!$opt['market']) {
+        fwrite(STDERR, "--espn needs --market=ID (the Kalshi market of that fighter).\n");
+        exit(1);
+    }
+    $db = db();
+    $q = $db->prepare('SELECT id, event_id, yes_subtitle FROM markets WHERE id = :id');
+    $q->execute([':id' => $opt['market']]);
+    $mk = $q->fetch();
+    if (!$mk) {
+        fwrite(STDERR, "Market #{$opt['market']} not found.\n");
+        exit(1);
+    }
+    $db->prepare('INSERT INTO fighters (espn_athlete_id, full_name) VALUES (:a, :n) ON CONFLICT (espn_athlete_id) DO NOTHING')
+       ->execute([':a' => (string) $opt['espn'], ':n' => $mk['yes_subtitle'] ?: "ESPN athlete {$opt['espn']}"]);
+    $q = $db->prepare('SELECT id FROM fighters WHERE espn_athlete_id = :a');
+    $q->execute([':a' => (string) $opt['espn']]);
+    $fid = (int) $q->fetchColumn();
+    // The other fighter of the same fight, if that market is already linked.
+    $q = $db->prepare('SELECT mf.market_id, mf.fighter_id, mf.upcoming_fight_id FROM market_fighters mf JOIN markets m ON m.id = mf.market_id
+                        WHERE m.event_id = :e AND m.id <> :id LIMIT 1');
+    $q->execute([':e' => $mk['event_id'], ':id' => $mk['id']]);
+    $other = $q->fetch() ?: null;
+    $db->prepare("INSERT INTO market_fighters (market_id, fighter_id, opponent_id, upcoming_fight_id, match_method)
+                  VALUES (:m, :f, :o, :u, 'manual')
+                  ON CONFLICT (market_id) DO UPDATE SET fighter_id = EXCLUDED.fighter_id,
+                         opponent_id = COALESCE(EXCLUDED.opponent_id, market_fighters.opponent_id),
+                         upcoming_fight_id = COALESCE(EXCLUDED.upcoming_fight_id, market_fighters.upcoming_fight_id),
+                         match_method = 'manual', matched_at = NOW()")
+       ->execute([':m' => $mk['id'], ':f' => $fid, ':o' => $other['fighter_id'] ?? null, ':u' => $other['upcoming_fight_id'] ?? null]);
+    if ($other) {   // and tell the other market who its opponent is
+        $db->prepare('UPDATE market_fighters SET opponent_id = :f WHERE market_id = :m AND (opponent_id IS NULL OR opponent_id <> :f2)')
+           ->execute([':f' => $fid, ':f2' => $fid, ':m' => $other['market_id']]);
+    }
+    $say("Linked market #{$mk['id']} (\"{$mk['yes_subtitle']}\") to ESPN athlete {$opt['espn']} by hand" . ($other ? ", opponent from market #{$other['market_id']}" : '') . '.');
+    // Sync both markets of the fight.
+    $opt['markets'] = array_values(array_filter([(int) $mk['id'], $other ? (int) $other['market_id'] : null]));
+}
 $runId = null;
 if (!$opt['predict-only']) {
-    $r = FighterSync::make($say)->run($opt['budget'], $opt['market'] ? [$opt['market']] : null, $opt['relink'], $opt['deep']);
+    $r = FighterSync::make($say)->run($opt['budget'], $opt['markets'] ?? ($opt['market'] ? [$opt['market']] : null), $opt['relink'], $opt['deep']);
     $runId = $r['run_id'];
 }
 
@@ -76,6 +119,9 @@ foreach ($rows as $r) {
         implode('', array_map(fn($x) => str_pad($x, 6), $ps)), $k, $why);
     unset($res);
 }
-if (!$rows) {
+if (!$rows && $opt['market']) {
+    echo "Market #{$opt['market']} isn't matched to an ESPN fighter. Find the fighter on espn.com (the number in\n"
+       . "espn.com/mma/fighter/_/id/<number>/...) and run: php bin/fighters_sync.php --market={$opt['market']} --espn=<number>\n";
+} elseif (!$rows) {
     echo "No linked markets. Run a scan first so Kalshi markets exist, then run this again.\n";
 }
