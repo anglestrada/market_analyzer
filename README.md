@@ -168,6 +168,11 @@ reversed order): if ESPN's search finds nothing for the full name, the last name
 fit. If a fighter still isn't found (or the match is wrong), link it by hand with the number from the fighter's ESPN
 URL (`espn.com/mma/fighter/_/id/<number>/...`):
 `php bin/fighters_sync.php --market=ID --espn=<number>`. Manual links are never overwritten.
+
+While `bin/fighters_sync.php` runs it shows where it is: the step (1 matching markets, 2 card fighters, 3 their past
+opponents), which fighter (`Fighter 2/4`, `Fighter 2/4 > opponent 5/24`), which fight (`fight 12/27`), and the ESPN
+requests used and time so far. The first sync of a fighter with a long career can take several minutes (every fight,
+plus each past opponent's record on the day); after that it only fetches new fights.
 The sync job never overwrites manual rows.
 
 ## Scoring the fight model
