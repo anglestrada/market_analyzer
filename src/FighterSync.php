@@ -176,9 +176,47 @@ final class FighterSync
         }
     }
 
+    /**
+     * ESPN fighter for a Kalshi name. Kalshi and ESPN don't always spell names the same ("Alex Volkanovski" on
+     * Kalshi is "Alexander Volkanovski" on ESPN, whose search then finds nothing), so: the full name first, then
+     * the last name alone, keeping only a result whose last name matches and whose first name fits
+     * (Alex / Alexander, same initial, or the names in the other order).
+     */
     private function searchFighter(string $name): ?int
     {
-        $data = $this->get($this->search . '?' . http_build_query(['query' => $name, 'limit' => 10]), true);
+        $tokens = self::nameTokens($name);
+        if (!$tokens) {
+            return null;
+        }
+        $last    = (string) end($tokens);
+        $queries = [$name];
+        if (count($tokens) > 1 && strlen($last) >= 3) {
+            $queries[] = $last;
+        }
+        foreach ($queries as $q) {
+            $best = null;
+            $bestScore = 0;
+            foreach ($this->searchCandidates($q) as [$aid, $display]) {
+                $score = self::nameScore($tokens, self::nameTokens($display));
+                if ($score > $bestScore) {
+                    [$best, $bestScore] = [[$aid, $display], $score];
+                }
+            }
+            if ($best !== null) {
+                if ($q !== $name || strcasecmp($best[1], $name) !== 0) {
+                    $this->say("  ~ \"$name\" matched ESPN \"{$best[1]}\" (#{$best[0]})");
+                }
+                return $this->ensureFighter($best[0], $best[1]);
+            }
+        }
+        return null;
+    }
+
+    /** @return list<array{0:string,1:string}> ESPN athlete id + display name for MMA players in a search */
+    private function searchCandidates(string $query): array
+    {
+        $data = $this->get($this->search . '?' . http_build_query(['query' => $query, 'limit' => 10]), true);
+        $out = [];
         foreach ($data['results'] ?? [] as $group) {
             if (($group['type'] ?? '') !== 'player') {
                 continue;
@@ -186,11 +224,59 @@ final class FighterSync
             foreach ($group['contents'] ?? [] as $c) {
                 $web = (string) ($c['link']['web'] ?? '');
                 if (($c['sport'] ?? '') === 'mma' && preg_match('#/mma/fighter/_/id/(\d+)#', $web, $mm)) {
-                    return $this->ensureFighter($mm[1], (string) ($c['displayName'] ?? $name));
+                    $out[] = [$mm[1], (string) ($c['displayName'] ?? $query)];
                 }
             }
         }
-        return null;
+        return $out;
+    }
+
+    /** "José Aldo Jr." → ['jose', 'aldo'] (lower case, no accents, punctuation or Jr./Sr.) */
+    public static function nameTokens(string $name): array
+    {
+        $s = trim($name);
+        if (function_exists('transliterator_transliterate')) {
+            $s = (string) transliterator_transliterate('Any-Latin; Latin-ASCII', $s);
+        } elseif (function_exists('iconv')) {
+            $s = (string) (@iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s) ?: $s);
+        }
+        $s = strtolower(preg_replace("/[^A-Za-z\s-]+/", '', $s));
+        $parts = preg_split('/[\s-]+/', trim($s), -1, PREG_SPLIT_NO_EMPTY);
+        while (count($parts) > 1 && in_array(end($parts), ['jr', 'sr', 'ii', 'iii', 'iv'], true)) {
+            array_pop($parts);
+        }
+        return $parts;
+    }
+
+    /**
+     * How well two names fit, 0 = not the same fighter. Last names must match (or the two names are the same
+     * words in another order, e.g. "Song Yadong" / "Yadong Song"); then the first name: same > one starts with
+     * the other (Alex / Alexander) > same initial > no first name to compare.
+     */
+    public static function nameScore(array $a, array $b): int
+    {
+        if (!$a || !$b) {
+            return 0;
+        }
+        $sa = $a; $sb = $b;
+        sort($sa); sort($sb);
+        if ($sa === $sb) {
+            return 100;
+        }
+        [$la, $lb] = [(string) end($a), (string) end($b)];
+        if ($la !== $lb && !(strlen($la) >= 6 && levenshtein($la, $lb) <= 1)) {   // one-letter spelling slips only
+            return 0;
+        }
+        if (count($a) === 1 || count($b) === 1) {
+            return 10;
+        }
+        [$fa, $fb] = [$a[0], $b[0]];
+        return match (true) {
+            $fa === $fb                                    => 90,
+            str_starts_with($fa, $fb) || str_starts_with($fb, $fa) => 70,
+            $fa[0] === $fb[0]                              => 40,
+            default                                        => 0,
+        };
     }
 
     private function upsertUpcomingFight(array $espn): ?int
