@@ -34,7 +34,36 @@ foreach (array_slice($argv, 1) as $a) {
     }
 }
 
-$say = fn(string $m) => print('[' . gmdate('H:i:s') . "] $m\n");
+// Output: normal lines get a timestamp; the "fight 12/27 | 140/3000 requests | 2:10" line is redrawn in place
+// on a terminal (\r), or printed every 10 seconds when the output goes to a file.
+$tty  = function_exists('stream_isatty') && @stream_isatty(STDOUT);
+$live = '';          // the line currently drawn in place
+$lastPrint = 0.0;
+$clear = function () use (&$live): void {
+    if ($live !== '') {
+        echo "\r" . str_repeat(' ', mb_strlen($live)) . "\r";
+        $live = '';
+    }
+};
+$say = function (string $m) use ($clear): void {
+    $clear();
+    echo '[' . gmdate('H:i:s') . "] $m\n";
+};
+$progress = function (string $line, bool $transient) use ($say, $tty, &$live, &$lastPrint): void {
+    if (!$transient) {
+        $say($line);
+        return;
+    }
+    if ($tty) {
+        $line = mb_strimwidth($line, 0, 118, '...');
+        $pad  = max(0, mb_strlen($live) - mb_strlen($line));
+        echo "\r$line" . str_repeat(' ', $pad);
+        $live = $line;
+    } elseif (microtime(true) - $lastPrint >= 10) {
+        $say($line);
+        $lastPrint = microtime(true);
+    }
+};
 
 // Manual link: --market=ID --espn=ATHLETE_ID (kept by every later sync; --relink doesn't touch it either).
 if ($opt['espn'] !== null) {
@@ -77,7 +106,7 @@ if ($opt['espn'] !== null) {
 }
 $runId = null;
 if (!$opt['predict-only']) {
-    $r = FighterSync::make($say)->run($opt['budget'], $opt['markets'] ?? ($opt['market'] ? [$opt['market']] : null), $opt['relink'], $opt['deep']);
+    $r = FighterSync::make($say)->onProgress($progress)->run($opt['budget'], $opt['markets'] ?? ($opt['market'] ? [$opt['market']] : null), $opt['relink'], $opt['deep']);
     $runId = $r['run_id'];
 }
 

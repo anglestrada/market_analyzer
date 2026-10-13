@@ -31,6 +31,10 @@ final class FighterSync
 
     /** @var callable|null */
     private $log;
+    /** @var callable|null fn(string $line, bool $transient): progress for the CLI (the scan doesn't set it) */
+    private $progress = null;
+    private ?string $label = null;   // "Fighter 2/4", "Fighter 2/4 > opponent 5/24"
+    private float $started = 0.0;
 
     public function __construct(
         private PDO $db,
@@ -48,6 +52,26 @@ final class FighterSync
     }
 
     /**
+     * Progress lines while it runs. $transient = true for the "fight 12/27 | 140 requests" line that the CLI
+     * overwrites in place; false for lines worth keeping ("Fighter 2/4 Alexander Volkanovski: 31 fights on ESPN, 27 to fetch").
+     */
+    public function onProgress(callable $cb): self
+    {
+        $this->progress = $cb;
+        return $this;
+    }
+
+    private function progress(string $line, bool $transient = true): void
+    {
+        if ($this->progress === null) {
+            return;
+        }
+        $sec = (int) (microtime(true) - $this->started);
+        $tail = sprintf('%d/%d requests | %d:%02d', $this->requests, $this->budget, intdiv($sec, 60), $sec % 60);
+        ($this->progress)($transient ? "$line | $tail" : $line, $transient);
+    }
+
+    /**
      * @param int[]|null $marketIds only these markets (default: every open UFC market)
      * @return array{run_id:int, status:string, requests:int, fighters:int, fights:int, error:?string}
      */
@@ -59,6 +83,7 @@ final class FighterSync
     {
         $this->budget = max(1, $budget);
         $this->deep   = $deep;
+        $this->started = microtime(true);
         $runId = (int) $this->db->query("INSERT INTO fighter_sync_runs (status) VALUES ('running') RETURNING id")->fetchColumn();
         $status = 'completed';
         $error  = null;
@@ -76,14 +101,21 @@ final class FighterSync
                     }
                 }
             }
+            $this->progress('Step 2 of 3 | card fighters: ' . count($ids) . ' to check', false);
+            $i = 0;
             foreach ($ids as $fighterId => $finished) {
+                $this->label = sprintf('Fighter %d/%d', ++$i, count($ids));
                 // A finished fight asked for by --market= is re-read right away; the scan does it at most hourly.
                 $this->syncFighter($fighterId, 'full', null, $finished ? ($marketIds ? 0 : self::FINISHED_RESYNC_HOURS) : null);
             }
             // Their past opponents: just enough history for the record on the day they met.
+            $this->progress('Step 3 of 3 | past opponents of the card fighters (their record on the day they fought)', false);
+            $i = 0;
             foreach (array_keys($ids) as $fighterId) {
+                $this->label = sprintf('Fighter %d/%d', ++$i, count($ids));
                 $this->syncOpponentRecords($fighterId);
             }
+            $this->label = null;
         } catch (SyncBudgetExceeded) {
             $status = 'partial';
             $error  = "Stopped after {$this->requests} ESPN requests (budget); the next run continues.";
@@ -124,10 +156,11 @@ final class FighterSync
         $stmt = $this->db->prepare($sql);
         $stmt->execute($params);
 
-        foreach ($stmt->fetchAll() as $m) {
-            if ($m['match_method'] === 'manual' || ($m['linked'] && $m['opponent_id'] && !$relink)) {
-                continue;
-            }
+        $all  = $stmt->fetchAll();
+        $todo = array_values(array_filter($all, fn($m) => !($m['match_method'] === 'manual' || ($m['linked'] && $m['opponent_id'] && !$relink))));
+        $this->progress(sprintf('Step 1 of 3 | matching markets to ESPN: %d of %d need it', count($todo), count($all)), false);
+        foreach ($todo as $n => $m) {
+            $this->progress(sprintf('Matching market %d/%d: %s', $n + 1, count($todo), $m['yes_subtitle'] ?: $m['market_title']));
             $name = trim((string) $m['yes_subtitle']);
             if ($name === '' || in_array(strtolower($name), ['yes', 'no'], true)) {
                 continue;
@@ -316,14 +349,32 @@ final class FighterSync
         }
         $freshHours ??= self::FULL_RESYNC_HOURS;
         $fresh = $f['history_synced_at'] && strtotime($f['history_synced_at']) > time() - $freshHours * 3600;
+        $who = trim(($this->label ? $this->label . ' ' : '') . $f['full_name']);
         if ($level === 'full' && $fresh) {
+            $this->progress("$who: up to date");
             return;
         }
 
+        $this->progress("$who: reading profile");
         $this->syncProfile($f);
+        $who = trim(($this->label ? $this->label . ' ' : '') . ($this->fighter($fighterId)['full_name'] ?? $f['full_name']));   // ESPN's spelling now
+        $this->progress("$who: reading fight list");
         $log   = $this->get($this->core . "/athletes/{$f['espn_athlete_id']}/eventlog?limit=200");
         $items = $log['events']['items'] ?? $log['items'] ?? [];
         $this->db->prepare('UPDATE fighters SET fights_listed = :n WHERE id = :id')->execute([':n' => count($items), ':id' => $fighterId]);
+
+        // How many of the listed fights still need fetching (for "fight 3/12"; the basic level may stop early).
+        $need = 0;
+        foreach ($items as $item) {
+            $known = preg_match('#/competitions/(\d+)#', (string) ($item['competition']['$ref'] ?? ''), $cm) ? $this->knownFight($cm[1]) : null;
+            if (!($known && ($known['detail_level'] === 'full' || $level === 'basic') && $known['status_state'] === 'post')) {
+                $need++;
+            }
+        }
+        if ($level === 'full') {
+            $this->progress(sprintf('%s: %d fights on ESPN, %s', $who, count($items), $need ? "$need to fetch" : 'all stored already'), $need === 0);
+        }
+        $done = 0;
 
         $sinceTs = $since ? strtotime($since) : null;
         foreach ($items as $item) {
@@ -341,6 +392,7 @@ final class FighterSync
                 }
                 continue;
             }
+            $this->progress(sprintf('%s: fight %d/%d', $who, ++$done, $need));
             $date = $this->syncFight($compUrl, $eventId, $compId, $league, $level);
             if ($sinceTs !== null && $date !== null && strtotime($date) < $sinceTs) {
                 break;
@@ -366,7 +418,10 @@ final class FighterSync
                   WHERE me.fighter_id = :id AND f.status_state = 'post' AND f.league = 'ufc'"
             );
             $stmt->execute([':id' => $fighterId]);
-            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $opp) {
+            $opps = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $this->opponentsStart($fighterId, count($opps));
+            foreach ($opps as $j => $opp) {
+                $this->label = $this->opponentLabel($fighterId, $j, count($opps));
                 $this->syncFighter((int) $opp, 'full');
             }
             return;
@@ -380,9 +435,23 @@ final class FighterSync
               GROUP BY o.fighter_id"
         );
         $stmt->execute([':id' => $fighterId]);
-        foreach ($stmt->fetchAll() as $r) {
+        $opps = $stmt->fetchAll();
+        $this->opponentsStart($fighterId, count($opps));
+        foreach ($opps as $j => $r) {
+            $this->label = $this->opponentLabel($fighterId, $j, count($opps));
             $this->syncFighter((int) $r['opp'], 'basic', $r['since']);
         }
+    }
+
+    private function opponentsStart(int $fighterId, int $n): void
+    {
+        $name = $this->fighter($fighterId)['full_name'] ?? "#$fighterId";
+        $this->progress(sprintf('%s %s: %s', $this->label, $name, $n ? "$n past opponents to fill in" : 'opponents done already'), $n === 0);
+    }
+
+    private function opponentLabel(int $fighterId, int $j, int $n): string
+    {
+        return sprintf('%s > opponent %d/%d', preg_replace('/ > opponent.*$/', '', (string) $this->label), $j + 1, $n);
     }
 
     private function syncProfile(array $f): void
